@@ -1,0 +1,63 @@
+# =====================================================================
+# MonitoringDashboard — "create a Grafana dashboard from a template"
+#
+# Standard dashboards are already created by ClusterMonitoring and
+# ApplicationProfileMonitoring (defaultDashboards: true). Use this object
+# for EXTRA dashboards, e.g. one for HLR's Postgres database.
+#
+# What Drishti creates from this:
+#   - A GrafanaDashboard object (picked up by grafana-operator), with the
+#     template's filters filled in with the target below.
+#
+# Note: a postgres dashboard only shows data if Postgres metrics are being
+# collected. That likely needs a future "DatabaseMonitoring" object.
+#
+# Minimal version:
+#   apiVersion: monitoring.drishti.io/v1alpha1
+#   kind: MonitoringDashboard
+#   metadata:
+#     name: hlr-postgres
+#     namespace: hlr
+#   spec:
+#     template: postgres
+#     target:
+#       instance: hlr-postgres
+# =====================================================================
+apiVersion: monitoring.drishti.io/v1alpha1
+kind: MonitoringDashboard
+metadata:
+  name: hlr-postgres
+  namespace: hlr
+spec:
+  # REQUIRED. Allowed: platform | java-app | postgres | nginx
+  # Why: decides which pre-built charts appear. There is no sensible
+  # "default dashboard type", so the SRE must choose.
+  template: postgres
+
+  # REQUIRED. What the dashboard shows data for.
+  # Why: the same postgres template is reused for every database. Drishti
+  # fills this value into every chart's filter so you only see THIS database.
+  target:
+    instance: hlr-postgres
+    # OPTIONAL. Default: this object's namespace.
+    namespace: hlr
+
+  # OPTIONAL. Default: "<namespace> - <template>"  →  "hlr - postgres"
+  title: "HLR - Postgres"
+
+  # OPTIONAL. Grafana folder to put it in. Default: the namespace name.
+  # Why: keeps each team's dashboards together.
+  folder: HLR
+
+  # OPTIONAL. Default: 1m. How often the open dashboard refreshes.
+  refreshInterval: 1m
+
+  # OPTIONAL. Default: 6h. Time range shown when the dashboard opens.
+  defaultTimeRange: 6h
+
+  # OPTIONAL. Which Grafana to create it in.
+  # Default: the Grafana configured when Drishti was installed.
+  # grafana:
+  #   instanceSelector:
+  #     matchLabels:
+  #       dashboards: shared

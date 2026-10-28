@@ -1,0 +1,71 @@
+# =====================================================================
+# MonitoringAlert — "create a set of alerts from a template"
+#
+# Standard alerts are already created by ClusterMonitoring and
+# ApplicationProfileMonitoring (defaultAlerts: true). Use this object to
+# route alerts to a specific team, tune thresholds, or add alert sets.
+#
+# What Drishti creates from this:
+#   - A PrometheusRule object (the alert conditions)
+#   - An AlertmanagerConfig route (who gets notified)
+#
+# Example "java-app" template contains these alerts:
+#   ServiceDown, HighErrorRate, HighLatencyP95, JvmHeapHigh, JvmGcPauseHigh
+# (thresholds below are illustrative — agree real values with the SRE team)
+#
+# Minimal version:
+#   apiVersion: monitoring.drishti.io/v1alpha1
+#   kind: MonitoringAlert
+#   metadata:
+#     name: hlr-java-alerts
+#     namespace: hlr
+#   spec:
+#     template: java-app
+#     target:
+#       application: home-loan-rewrite
+#     notify:
+#       receiver: hlr-sre-oncall
+# =====================================================================
+apiVersion: monitoring.drishti.io/v1alpha1
+kind: MonitoringAlert
+metadata:
+  name: hlr-java-alerts
+  namespace: hlr
+spec:
+  # REQUIRED. Allowed: platform | java-app | postgres | nginx
+  # Why: decides which alert rules are created.
+  template: java-app
+
+  # REQUIRED. What the alerts watch.
+  # Why: same reason as dashboards — the template is generic, this makes
+  # it about HLR only. Must match applicationName in ApplicationProfileMonitoring.
+  target:
+    application: home-loan-rewrite
+
+  # REQUIRED. Who gets notified.
+  # Why: an alert nobody receives is useless, and Drishti cannot guess the
+  # owning team. "receiver" is a name the platform team has already set up
+  # in Alertmanager (e.g. Slack channel + on-call phone), so SREs don't
+  # handle webhooks or passwords here.
+  notify:
+    receiver: hlr-sre-oncall
+
+  # OPTIONAL. Change specific alerts. Anything not listed keeps the
+  # template's default threshold, duration and severity.
+  # Why: templates are a good start, but every app has different "normal".
+  overrides:
+    - alert: HighErrorRate
+      threshold: "2%"     # template default: 5%
+      for: 5m             # how long it must stay bad before firing (default 10m)
+      severity: critical  # default: warning
+    - alert: HighLatencyP95
+      threshold: "1500ms" # template default: 2000ms
+
+  # OPTIONAL. Default: empty (all template alerts on).
+  # Why: turn off alerts that are noisy or irrelevant for this app.
+  disabledAlerts:
+    - JvmGcPauseHigh
+
+  # OPTIONAL. Default: true. Set false to pause all these alerts,
+  # e.g. during a planned migration, without deleting the object.
+  enabled: true

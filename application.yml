@@ -1,0 +1,70 @@
+# =====================================================================
+# ApplicationProfileMonitoring — "monitor the apps in this namespace" (APM)
+# Namespaced: create it in the same namespace as the apps.
+#
+# What Drishti creates from this:
+#   - OTel Instrumentation object (tells the OTel Operator which agent to use)
+#   - The "inject-java" annotation on the selected apps
+#   - Standard "java-app" dashboard and alerts (if enabled below)
+#
+# Minimal version:
+#   apiVersion: monitoring.drishti.io/v1alpha1
+#   kind: ApplicationProfileMonitoring
+#   metadata:
+#     name: hlr-java-services
+#     namespace: hlr
+#   spec:
+#     language: java
+# =====================================================================
+apiVersion: monitoring.drishti.io/v1alpha1
+kind: ApplicationProfileMonitoring
+metadata:
+  name: hlr-java-services
+  # REQUIRED (by Kubernetes, for namespaced objects).
+  # Why: Drishti only touches apps in this namespace, so one team can't
+  # accidentally instrument another team's apps.
+  namespace: hlr
+spec:
+  # REQUIRED. Allowed today: java  (later: nodejs | python | dotnet)
+  # Why: each language needs a different agent. Guessing from the container
+  # image is unreliable, and a wrong agent can crash the app.
+  language: java
+
+  # OPTIONAL. Which apps to monitor.
+  # Default: every Deployment and StatefulSet in this namespace.
+  # Why: lets you leave out batch jobs or apps you don't want instrumented.
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: home-loan-rewrite
+
+  # OPTIONAL. Default: metadata.name ("hlr-java-services").
+  # Why: groups all these services under one name in dashboards and alerts.
+  applicationName: home-loan-rewrite
+
+  # OPTIONAL. Default: the environment from ClusterMonitoring.
+  environment: prod
+
+  # OPTIONAL. Percentage of requests recorded as full traces. Default: 10.
+  # Why: recording 100% of traces is expensive. 10% is usually enough to
+  # find slow or failing requests. Raise it temporarily while debugging.
+  traceSamplingPercent: 10
+
+  # OPTIONAL. Default: false.
+  # Why: the Java agent is only added when a pod STARTS.
+  #   false = takes effect on the app's next deployment (safe, no surprise restarts)
+  #   true  = Drishti does a rolling restart of the selected apps right away
+  restartWorkloads: false
+
+  # OPTIONAL. Java-specific settings.
+  java:
+    # Default: true. Records SQL queries in traces, with values masked
+    # (e.g. "WHERE pan = ?"). Set false to drop query text entirely —
+    # worth discussing for a home-loan app handling customer data.
+    recordDbQueries: true
+    # Default: the agent version pinned by this Drishti release.
+    # Why optional: Drishti tests a known-good version; override only if needed.
+    # agentVersion: "<version>"
+
+  # OPTIONAL. Default: true for both.
+  defaultDashboards: true
+  defaultAlerts: true

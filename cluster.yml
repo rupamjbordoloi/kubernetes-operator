@@ -1,0 +1,86 @@
+# =====================================================================
+# ClusterMonitoring — "monitor this whole Kubernetes cluster"
+# One per cluster. It is cluster-scoped, so there is no namespace.
+#
+# What Drishti creates from this:
+#   - OTel collector as a DaemonSet  (one per node: node + pod metrics, logs)
+#   - OTel collector as a Deployment (cluster-level metrics, events, gateway)
+#   - Standard "platform" dashboard and alerts (if enabled below)
+#
+# Minimal version (everything else uses defaults):
+#   apiVersion: monitoring.drishti.io/v1alpha1
+#   kind: ClusterMonitoring
+#   metadata:
+#     name: hlr-gke-prod
+#   spec:
+#     platform: gke
+#     clusterName: hlr-gke-prod
+# =====================================================================
+apiVersion: monitoring.drishti.io/v1alpha1
+kind: ClusterMonitoring
+metadata:
+  name: hlr-gke-prod
+spec:
+  # REQUIRED. Allowed: gke | eks | ocp
+  # Why: each platform needs different settings (e.g. OpenShift needs extra
+  # security permissions for the per-node collector). Drishti could try to
+  # auto-detect it, but a wrong guess breaks collection, so we ask.
+  platform: gke
+
+  # REQUIRED.
+  # Why: added as a label on every metric, so dashboards and alerts can tell
+  # clusters apart. Kubernetes doesn't reliably know its own "friendly" name.
+  clusterName: hlr-gke-prod
+
+  # OPTIONAL. Default: the environment set when Drishti was installed.
+  # Why: lets SREs filter dashboards by prod / uat / dev.
+  environment: prod
+
+  # OPTIONAL. What to collect. Each item has its own default.
+  collect:
+    nodes: true    # default true  — CPU, memory, disk of each machine
+    pods: true     # default true  — CPU, memory, restarts of each pod
+    events: true   # default true  — e.g. "pod crashed", "image pull failed"
+    logs: false    # default false — high volume and storage cost, so opt-in
+
+  # OPTIONAL. How often metrics are read. Default: 30s.
+  # Why: lower = more detail but more cost. 30s suits most clusters.
+  collectionInterval: 30s
+
+  # OPTIONAL. Where the data is sent.
+  # Default: the backend configured when Drishti was installed (Helm values).
+  # Why optional: SREs shouldn't need to know backend URLs. Only set this to
+  # send one cluster's data somewhere different.
+  # destination:
+  #   metrics: http://mimir.observability.svc:9009/otlp
+  #   traces:  http://tempo.observability.svc:4318
+  #   logs:    http://loki.observability.svc:3100/otlp
+
+  # OPTIONAL. Default: true for both.
+  # Why: gives every cluster the standard platform dashboard and alerts with
+  # zero extra work. Use MonitoringDashboard / MonitoringAlert for custom ones.
+  defaultDashboards: true
+  defaultAlerts: true
+
+  # OPTIONAL. CPU / memory for the collector pods.
+  # Default: sized by Drishti per platform. Only change if collectors are
+  # being throttled or killed for using too much memory.
+  # collectorResources:
+  #   perNode:
+  #     cpu: 200m
+  #     memory: 256Mi
+  #   central:
+  #     cpu: 500m
+  #     memory: 1Gi
+
+# ---------------------------------------------------------------------
+# status: is written BY DRISHTI, never by the SRE. Example of what
+# `kubectl get clustermonitoring hlr-gke-prod -o yaml` would show:
+#
+# status:
+#   conditions:
+#     - type: Ready
+#       status: "True"
+#       reason: AllComponentsRunning
+#       message: "2 collectors, 1 dashboard, 6 alert rules created"
+# ---------------------------------------------------------------------
