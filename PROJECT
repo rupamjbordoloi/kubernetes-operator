@@ -8,4 +8,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: kubernetes-operator
 repo: github.com/hdfc/cluster-observability-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: example.com
+  group: observability
+  kind: ClusterObservability
+  path: github.com/hdfc/cluster-observability-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

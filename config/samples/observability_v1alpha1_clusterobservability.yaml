@@ -1,0 +1,9 @@
+apiVersion: observability.example.com/v1alpha1
+kind: ClusterObservability
+metadata:
+  labels:
+    app.kubernetes.io/name: kubernetes-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: clusterobservability-sample
+spec:
+  # TODO(user): Add fields here
