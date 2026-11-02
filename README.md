@@ -21,8 +21,6 @@ Drishti then creates:
 | `<name>-agent` | DaemonSet (one pod per node) | Node + pod + container metrics from the kubelet; container logs (opt-in) |
 | `<name>-gateway` | Deployment (1 replica) + Service | Cluster-level metrics, Kubernetes events, OTLP gateway for apps; the only component that talks to the backend |
 | `<name>-collector` | ServiceAccount + ClusterRole + ClusterRoleBinding | Read-only API access for the collectors |
-| `<name>-platform-dashboard` | ConfigMap (`grafana_dashboard: "1"`) | Standard platform dashboard, loaded by the Grafana sidecar |
-| `<name>-platform-alerts` | PrometheusRule | 6 standard platform alerts (created only if the CRD exists) |
 
 The full annotated example is [yaml/cluster.yml](yaml/cluster.yml).
 
@@ -150,10 +148,10 @@ ok  github.com/hdfc/drishti-operator/internal/controller  ... coverage: 82% of s
 What the tests cover:
 
 - **CRD defaulting**: an empty `collect: {}` becomes `nodes/pods/events: true, logs: false`, and `collectionInterval: 30s`
-- **Reconcile**: DaemonSet, Deployment, Service, ConfigMaps, ClusterRole/Binding and dashboard are created with owner references; `Ready=False/Progressing` is reported (envtest runs no pods); alerts are skipped when the PrometheusRule CRD is absent
+- **Reconcile**: DaemonSet, Deployment, Service, ConfigMaps, ClusterRole/Binding are created with owner references; `Ready=False/Progressing` is reported (envtest runs no pods)
 - **Toggles**: turning off nodes, pods and logs deletes the agent DaemonSet
 - **Singleton**: a second ClusterMonitoring is marked `DuplicateClusterMonitoring` and creates nothing
-- **Config rendering**: pipelines per toggle, self-log exclusion, the debug-exporter fallback, per-signal destination override, dashboard JSON, 6 alert rules
+- **Config rendering**: pipelines per toggle, self-log exclusion, the debug-exporter fallback, per-signal destination override
 
 > Building on `/mnt/d` is slower than on the Linux filesystem. For faster builds, clone into `~/src` inside WSL.
 
@@ -239,17 +237,7 @@ kubectl patch cmon hlr-gke-prod --type merge -p '{"spec":{"clusterName":"other"}
 # The ClusterMonitoring "hlr-gke-prod" is invalid: spec.clusterName: Invalid value: "string": clusterName is immutable
 ```
 
-### 4.7 See the default alerts (optional)
-
-Alerts use the prometheus-operator `PrometheusRule` CRD. Install just the CRD, and the next reconcile creates the rule:
-
-```bash
-kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.80.0/example/prometheus-operator-crd/monitoring.coreos.com_prometheusrules.yaml
-kubectl annotate cmon hlr-gke-prod drishti.io/poke="$(date +%s)" --overwrite   # trigger a reconcile
-kubectl -n drishti-system get prometheusrule hlr-gke-prod-platform-alerts -o yaml
-```
-
-### 4.8 Clean up
+### 4.7 Clean up
 
 ```bash
 kubectl delete -f yaml/cluster.yml     # garbage-collects every child (owner references)
@@ -258,7 +246,7 @@ make uninstall                         # removes the CRD
 kind delete cluster --name drishti
 ```
 
-### 4.9 Check the collector configs offline (optional)
+### 4.8 Check the collector configs offline (optional)
 
 To check the generated configs against the exact collector version without a cluster, download `otelcol-contrib` v0.120.0 and validate them:
 
@@ -283,7 +271,6 @@ Backends are install-time settings, the "Helm values". SREs normally don't set t
 | traces | `DRISHTI_TRACES_ENDPOINT` | `--default-traces-endpoint` | `http://tempo.observability.svc:4318` |
 | environment | `DRISHTI_DEFAULT_ENVIRONMENT` | `--default-environment` | `prod` |
 | collector image | `DRISHTI_COLLECTOR_IMAGE` | `--collector-image` | `otel/opentelemetry-collector-contrib:0.120.0` |
-| dashboard namespace | `DRISHTI_DASHBOARD_NAMESPACE` | `--dashboard-namespace` | `grafana` |
 
 Set them permanently in [config/manager/manager.yaml](config/manager/manager.yaml), or on a running install:
 
@@ -301,8 +288,6 @@ With `make run`, export the same variables before starting.
 
 - *Mimir/Prometheus*: endpoints accept OTLP/HTTP; the collector appends `/v1/metrics`. The gateway copies `k8s.cluster.name` and `deployment.environment` onto every datapoint, so they appear as `k8s_cluster_name` / `deployment_environment` labels without any `promote_otel_resource_attributes` setting.
 - *Loki 3.x*: native OTLP at `/otlp`.
-- *Grafana dashboards*: the Grafana Helm chart with `sidecar.dashboards.enabled=true` loads any ConfigMap labelled `grafana_dashboard: "1"`. If the sidecar only watches its own namespace, point `--dashboard-namespace` there.
-- *Alerts into Mimir*: PrometheusRule objects are synced to the Mimir ruler by Grafana Alloy (`mimir.rules.kubernetes`) or a similar sync. With a plain Prometheus Operator, make sure its `ruleSelector` matches `app.kubernetes.io/part-of: drishti`.
 
 ---
 
@@ -312,7 +297,7 @@ With `make run`, export the same variables before starting.
 
 Give an SRE one object per cluster that turns on standard logs and metrics collection, with good defaults and no knowledge of backend URLs or OTel internals. Keep platform differences (GKE, EKS, OpenShift) inside the operator.
 
-**Non-goals for v1alpha1:** per-application instrumentation (planned as separate `MonitoringDashboard` / `MonitoringAlert` / app CRDs), auto-injecting SDKs, tracing collection from nodes, multi-tenancy inside one cluster.
+**Non-goals for v1alpha1:** dashboards and alerts, per-application instrumentation, auto-injecting SDKs, tracing collection from nodes, multi-tenancy inside one cluster.
 
 ### 6.2 Architecture
 
@@ -331,13 +316,11 @@ flowchart LR
       end
       GW[gateway pod<br/>Deployment x1]
       SVC((Service<br/>:4317 / :4318))
-      DASH[ConfigMap<br/>dashboard JSON]
-      RULE[PrometheusRule<br/>6 alerts]
     end
     API[kube-apiserver]
     APPS[apps with OTel SDK]
 
-    OP -- creates / updates --> AG & GW & SVC & DASH & RULE
+    OP -- creates / updates --> AG & GW & SVC
     KL -- kubeletstats --> AG
     LOGS -- filelog (opt-in) --> AG
     AG -- OTLP gRPC --> SVC --> GW
@@ -347,8 +330,6 @@ flowchart LR
   GW -- OTLP/HTTP metrics --> MIMIR[(Mimir / Prometheus)]
   GW -- OTLP/HTTP logs + events --> LOKI[(Loki)]
   GW -- OTLP/HTTP traces --> TEMPO[(Tempo)]
-  DASH -. sidecar .-> GRAFANA[Grafana]
-  RULE -. ruler sync .-> MIMIR
 ```
 
 ### 6.3 The two collectors
@@ -395,7 +376,6 @@ Processors: `memory_limiter` → `resource/cluster` (upserts `k8s.cluster.name`,
 | **Owner references on every child** | Deleting the CR garbage-collects everything, including cluster-scoped RBAC. A namespaced child may point at a cluster-scoped owner. No finalizer is needed. |
 | **Config hash annotation on pod templates** | Collectors don't reload ConfigMaps. A changed config changes `drishti.io/config-hash`, which triggers a normal rolling update. |
 | **Requests = limits (Guaranteed QoS)** | `memory_limiter` uses the cgroup limit (80%) to shed load before an OOM-kill, and the scheduler reserves what the collector actually uses. |
-| **PrometheusRule is optional** | Many clusters don't run prometheus-operator. If the CRD is missing (`NoKindMatch`), alerts are skipped and the status says so. Nothing fails. |
 | **Label-filtered manager cache** | The manager only caches ConfigMaps, Services, Deployments and so on that carry `app.kubernetes.io/managed-by=drishti`. Without this it would cache every such object in the cluster. |
 | **Collectors run in the operator namespace** | One place for RBAC, Pod Security labels and network policy. `ensureNamespace` creates it for `make run`, and the operator never deletes it. |
 
@@ -425,42 +405,25 @@ status:
     - type: Ready
       status: "True"
       reason: AllComponentsRunning
-      message: "2 collectors, 1 dashboard, 6 alert rules created"
+      message: "2 collectors created"
 ```
 
 | reason | status | meaning |
 |---|---|---|
 | `AllComponentsRunning` | True | Gateway available, and every scheduled agent pod is updated and ready |
-| `Progressing` | False | Rolling out, for example `gateway ready, agent 2/3 nodes ready; 2 collectors, …` |
+| `Progressing` | False | Rolling out, for example `gateway ready, agent 2/3 nodes ready; 2 collectors created` |
 | `ReconcileError` | False | An API call failed. The message has the error and the reconcile is retried with backoff. |
 | `DuplicateClusterMonitoring` | False | Another ClusterMonitoring is active. This one does nothing. |
 
 Changes to owned DaemonSet/Deployment status re-trigger reconcile, so `Ready` follows pod health without polling. Status is only written when it changes, so the controller doesn't loop on its own writes.
 
-### 6.8 Default dashboard and alerts
-
-The dashboard *Drishti / Platform / &lt;clusterName&gt;* has a `cluster` variable and these panels: node CPU, node memory working set, top-10 pods by CPU, top-10 pods by memory, container restarts (15m), node filesystem free %.
-
-Alerts (group `drishti-platform`, all filtered by `k8s_cluster_name`):
-
-| Alert | Expression (simplified) | for | severity |
-|---|---|---|---|
-| DrishtiNodeNotReady | `k8s_node_condition_ready == 0` | 5m | critical |
-| DrishtiNodeMemoryPressure | available / (available + working_set) < 10% | 10m | warning |
-| DrishtiNodeFilesystemAlmostFull | fs available / capacity < 10% | 15m | warning |
-| DrishtiPodCrashLooping | `delta(k8s_container_restarts[15m]) > 3` | 0m | warning |
-| DrishtiPodPendingTooLong | `k8s_pod_phase == 1` | 15m | warning |
-| DrishtiDeploymentReplicasUnavailable | desired − available > 0 | 15m | warning |
-
-Metric names assume the standard OTel → Prometheus translation that Mimir and Prometheus apply on OTLP ingest: dots become underscores and units become suffixes, so `k8s.node.memory.working_set` becomes `k8s_node_memory_working_set_bytes`. If your backend translates differently, adjust [platform_content.go](internal/controller/platform_content.go).
-
-### 6.9 Known limitations / next steps
+### 6.8 Known limitations / next steps
 
 - Log tailing starts `at: end` with no checkpoint storage, so lines written while an agent pod restarts are lost. Next step: the `file_storage` extension on a hostPath.
 - The gateway is a single replica, so there is a short gap during its rollout.
 - No admission webhook yet. Validation is CRD schema + CEL only.
 - If a child object with the same name already exists without the `managed-by=drishti` label, it is not adopted and reconcile reports an `AlreadyExists` error.
-- Not yet: `MonitoringDashboard` / `MonitoringAlert` CRDs for custom content, and a Helm chart.
+- Not yet: dashboards, alerts, and a Helm chart.
 
 ---
 
@@ -489,8 +452,6 @@ sequenceDiagram
     else
       C->>A: delete agent DaemonSet + ConfigMap
     end
-    C->>A: dashboard ConfigMap (or delete)
-    C->>A: PrometheusRule (skip if CRD missing, or delete)
     C->>A: status Ready (True / Progressing)
   end
   A-->>C: DaemonSet/Deployment status changes
@@ -506,7 +467,7 @@ Step by step for `kubectl apply -f yaml/cluster.yml`:
 3. It resolves effective settings: environment (CR → `--default-environment`), destination per signal (CR → install default → debug), and sizes (CR → platform default).
 4. It renders the two OTel configs from the toggles, writes them to ConfigMaps, and stamps their hash on the pod templates.
 5. Kubernetes schedules one agent per node and one gateway. The agents scrape the kubelet every `collectionInterval` and forward to the gateway, which adds cluster metrics and events, labels everything with `k8s.cluster.name=hlr-gke-prod`, `deployment.environment=prod`, and exports.
-6. When pods become ready, the owned-object watch fires again and the status turns `Ready=True: 2 collectors, 1 dashboard, 6 alert rules created`.
+6. When pods become ready, the owned-object watch fires again and the status turns `Ready=True: 2 collectors created`.
 7. `kubectl delete cmon hlr-gke-prod` removes everything through owner-reference garbage collection.
 
 ---
@@ -528,8 +489,6 @@ Step by step for `kubectl apply -f yaml/cluster.yml`:
 | `spec.destination.metrics` | URL `^https?://` | no | install default | OTLP/HTTP base URL |
 | `spec.destination.traces` | URL | no | install default | |
 | `spec.destination.logs` | URL | no | install default | |
-| `spec.defaultDashboards` | bool | no | `true` | Grafana dashboard ConfigMap |
-| `spec.defaultAlerts` | bool | no | `true` | PrometheusRule (if the CRD exists) |
 | `spec.collectorResources.perNode.{cpu,memory}` | quantity | no | per platform | Agent requests = limits |
 | `spec.collectorResources.central.{cpu,memory}` | quantity | no | per platform | Gateway requests = limits |
 | `status.observedGeneration` | int | | | |
@@ -551,7 +510,6 @@ Full schema: [config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml](co
 | `forbidden: ... attempting to grant RBAC permissions not currently held` | The operator role is out of date. Run `make manifests` then `make deploy`. |
 | Pods rejected by Pod Security with `logs: true` | The namespace needs `pod-security.kubernetes.io/enforce=privileged` |
 | `DuplicateClusterMonitoring` | `kubectl get cmon` and delete the extra one |
-| Message says `alerts skipped` | Install the PrometheusRule CRD ([4.7](#47-see-the-default-alerts-optional)) |
 | Nothing reaches the backend | `kubectl -n drishti-system logs deploy/hlr-gke-prod-gateway` and look for exporter errors. Confirm the endpoint resolves from inside the cluster. |
 
 ---
@@ -568,7 +526,6 @@ Full schema: [config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml](co
 │   ├── clustermonitoring_controller.go # Reconcile, status, RBAC markers, watches
 │   ├── collector_config.go             # renders agent + gateway OTel configs
 │   ├── resources.go                    # SA / RBAC / ConfigMap / DaemonSet / Deployment / Service builders
-│   ├── platform_content.go             # Grafana dashboard JSON + PrometheusRule alerts
 │   ├── options.go                      # install-time defaults and precedence rules
 │   ├── *_test.go                       # envtest + rendering tests
 │   └── suite_test.go                   # envtest bootstrap (scaffolded)

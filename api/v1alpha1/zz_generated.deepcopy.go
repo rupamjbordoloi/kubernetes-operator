@@ -98,16 +98,6 @@ func (in *ClusterMonitoringSpec) DeepCopyInto(out *ClusterMonitoringSpec) {
 		*out = new(DestinationSpec)
 		**out = **in
 	}
-	if in.DefaultDashboards != nil {
-		in, out := &in.DefaultDashboards, &out.DefaultDashboards
-		*out = new(bool)
-		**out = **in
-	}
-	if in.DefaultAlerts != nil {
-		in, out := &in.DefaultAlerts, &out.DefaultAlerts
-		*out = new(bool)
-		**out = **in
-	}
 	if in.CollectorResources != nil {
 		in, out := &in.CollectorResources, &out.CollectorResources
 		*out = new(CollectorResourcesSpec)

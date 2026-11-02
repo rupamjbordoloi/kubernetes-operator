@@ -94,8 +94,6 @@ func main() {
 	var drishtiOpts controller.Options
 	flag.StringVar(&drishtiOpts.Namespace, "collector-namespace", envOr("POD_NAMESPACE", controller.DefaultNamespace),
 		"Namespace where collectors are created. Defaults to the operator's own namespace.")
-	flag.StringVar(&drishtiOpts.DashboardNamespace, "dashboard-namespace", os.Getenv("DRISHTI_DASHBOARD_NAMESPACE"),
-		"Namespace for Grafana dashboard ConfigMaps. Defaults to --collector-namespace.")
 	flag.StringVar(&drishtiOpts.CollectorImage, "collector-image",
 		envOr("DRISHTI_COLLECTOR_IMAGE", controller.DefaultCollectorImage), "OpenTelemetry Collector (contrib) image.")
 	flag.StringVar(&drishtiOpts.Environment, "default-environment",

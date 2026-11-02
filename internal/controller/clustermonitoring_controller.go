@@ -29,7 +29,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,14 +51,11 @@ type ClusterMonitoringReconciler struct {
 
 // summary is what one reconcile produced; it drives the Ready condition.
 type summary struct {
-	agentEnabled  bool
-	agentReady    int32
-	agentDesired  int32
-	agentSettled  bool
-	gatewayReady  bool
-	dashboards    int
-	alertRules    int
-	alertsSkipped bool
+	agentEnabled bool
+	agentReady   int32
+	agentDesired int32
+	agentSettled bool
+	gatewayReady bool
 }
 
 // The operator's own permissions. It must hold every permission it grants to
@@ -78,13 +74,11 @@ type summary struct {
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=prometheusrules,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=quota.openshift.io,resources=clusterresourcequotas,verbs=get;list;watch
 // +kubebuilder:rbac:groups=security.openshift.io,resources=securitycontextconstraints,resourceNames=privileged,verbs=use
 
-// Reconcile turns one ClusterMonitoring into the collectors, RBAC, dashboard
-// and alert rules that monitor the cluster, then reports their health in
-// status.conditions.
+// Reconcile turns one ClusterMonitoring into the collectors and RBAC that
+// monitor the cluster, then reports their health in status.conditions.
 func (r *ClusterMonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	opts := r.Options.withDefaults()
@@ -156,11 +150,6 @@ func (r *ClusterMonitoringReconciler) reconcileComponents(ctx context.Context,
 
 	if err := r.ensureNamespace(ctx, ns); err != nil {
 		return sum, err
-	}
-	if opts.DashboardNamespace != ns {
-		if err := r.ensureNamespace(ctx, opts.DashboardNamespace); err != nil {
-			return sum, err
-		}
 	}
 
 	// 1. Identity + RBAC shared by both collectors.
@@ -239,43 +228,6 @@ func (r *ClusterMonitoringReconciler) reconcileComponents(ctx context.Context,
 		if err := r.deleteIfExists(ctx, agentCM); err != nil {
 			return sum, err
 		}
-	}
-
-	// 4. Standard dashboard (picked up by the Grafana sidecar).
-	dash := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: dashboardName(cm), Namespace: opts.DashboardNamespace}}
-	if cm.Spec.DashboardsEnabled() {
-		dashJSON, err := renderDashboard(cm)
-		if err != nil {
-			return sum, err
-		}
-		if err := r.apply(ctx, cm, dash, func() { mutateDashboardConfigMap(cm, dash, dashJSON) }); err != nil {
-			return sum, err
-		}
-		sum.dashboards = 1
-	} else if err := r.deleteIfExists(ctx, dash); err != nil {
-		return sum, err
-	}
-
-	// 5. Standard alerts. PrometheusRule is optional: skip if the CRD is absent.
-	rule := &unstructured.Unstructured{}
-	rule.SetGroupVersionKind(PrometheusRuleGVK)
-	rule.SetName(alertRuleName(cm))
-	rule.SetNamespace(ns)
-	if cm.Spec.AlertsEnabled() {
-		var mutateErr error
-		err := r.apply(ctx, cm, rule, func() { mutateErr = mutatePrometheusRule(cm, rule, env) })
-		switch {
-		case meta.IsNoMatchError(err):
-			sum.alertsSkipped = true
-		case err != nil:
-			return sum, err
-		case mutateErr != nil:
-			return sum, mutateErr
-		default:
-			sum.alertRules = len(platformAlertRules(cm))
-		}
-	} else if err := r.deleteIfExists(ctx, rule); err != nil {
-		return sum, err
 	}
 
 	return sum, nil
@@ -370,18 +322,13 @@ func plural(n int, word string) string {
 	return fmt.Sprintf("%d %ss", n, word)
 }
 
-// readyCondition renders the summary, e.g.
-// "2 collectors, 1 dashboard, 6 alert rules created".
+// readyCondition renders the summary, e.g. "2 collectors created".
 func (s summary) readyCondition() (metav1.ConditionStatus, string, string) {
 	collectors := 1
 	if s.agentEnabled {
 		collectors++
 	}
-	msg := fmt.Sprintf("%s, %s, %s created", plural(collectors, "collector"),
-		plural(s.dashboards, "dashboard"), plural(s.alertRules, "alert rule"))
-	if s.alertsSkipped {
-		msg += " (alerts skipped: PrometheusRule CRD not installed)"
-	}
+	msg := plural(collectors, "collector") + " created"
 
 	if !s.gatewayReady || (s.agentEnabled && !s.agentSettled) {
 		progress := "gateway not ready"

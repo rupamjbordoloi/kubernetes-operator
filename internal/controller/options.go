@@ -39,9 +39,6 @@ const (
 type Options struct {
 	// Namespace where the collector DaemonSet / Deployment are created.
 	Namespace string
-	// DashboardNamespace is where dashboard ConfigMaps go (Grafana sidecar
-	// watches it). Defaults to Namespace.
-	DashboardNamespace string
 	// CollectorImage is the OTel collector image.
 	CollectorImage string
 	// Environment is the default deployment.environment label.
@@ -54,9 +51,6 @@ type Options struct {
 func (o Options) withDefaults() Options {
 	if o.Namespace == "" {
 		o.Namespace = DefaultNamespace
-	}
-	if o.DashboardNamespace == "" {
-		o.DashboardNamespace = o.Namespace
 	}
 	if o.CollectorImage == "" {
 		o.CollectorImage = DefaultCollectorImage

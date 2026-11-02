@@ -106,10 +106,9 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		Expect(cm.Spec.Collect.Nodes).To(Equal(ptr.To(true)))
 		Expect(cm.Spec.Collect.Logs).To(Equal(ptr.To(false)))
 		Expect(cm.Spec.CollectionInterval.Duration).To(Equal(30 * time.Second))
-		Expect(cm.Spec.DefaultAlerts).To(Equal(ptr.To(true)))
 	})
 
-	It("creates collectors, RBAC and dashboard, and reports progress", func() {
+	It("creates collectors and RBAC, and reports progress", func() {
 		createCR(resourceName, monitoringv1alpha1.CollectSpec{Logs: ptr.To(true)})
 		reconcileOnce(resourceName)
 
@@ -137,21 +136,14 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "drishti:" + resourceName + ":collector"},
 			&rbacv1.ClusterRoleBinding{})).To(Succeed())
 
-		By("creating the Grafana dashboard ConfigMap")
-		dash := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-platform-dashboard", Namespace: ns},
-			dash)).To(Succeed())
-		Expect(dash.Labels).To(HaveKeyWithValue(grafanaDashboardLabel, "1"))
-
-		By("reporting Progressing, since envtest runs no pods, and skipping alerts without the CRD")
+		By("reporting Progressing, since envtest runs no pods")
 		cm := &monitoringv1alpha1.ClusterMonitoring{}
 		Expect(k8sClient.Get(ctx, key, cm)).To(Succeed())
 		cond := meta.FindStatusCondition(cm.Status.Conditions, monitoringv1alpha1.ConditionReady)
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal(monitoringv1alpha1.ReasonProgressing))
-		Expect(cond.Message).To(ContainSubstring("2 collectors, 1 dashboard, 0 alert rules created"))
-		Expect(cond.Message).To(ContainSubstring("PrometheusRule CRD not installed"))
+		Expect(cond.Message).To(ContainSubstring("2 collectors created"))
 	})
 
 	It("removes the agent when nothing node-local is collected", func() {

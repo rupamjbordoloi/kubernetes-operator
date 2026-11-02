@@ -196,8 +196,8 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 		m{"key": "deployment.environment", "value": environment, "action": "upsert"},
 	}}
 	// Prometheus-style backends keep resource attributes out of series labels
-	// by default. Copy the two we filter on onto every datapoint so dashboards
-	// and alerts work without backend-side configuration.
+	// by default. Copy the two we filter on onto every datapoint so queries can
+	// filter by them without backend-side configuration.
 	processors["transform/labels"] = m{
 		"error_mode": "ignore",
 		"metric_statements": []any{m{

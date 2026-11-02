@@ -17,5 +17,3 @@ spec:
     events: true
     logs: true
   collectionInterval: 30s
-  defaultDashboards: true
-  defaultAlerts: true

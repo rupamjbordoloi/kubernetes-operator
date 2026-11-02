@@ -66,7 +66,7 @@ spec:
               clusterName:
                 description: |-
                   clusterName is added as the k8s.cluster.name label on every metric and
-                  log so dashboards and alerts can tell clusters apart.
+                  log so clusters can be told apart in the backend.
                 maxLength: 63
                 minLength: 1
                 type: string
@@ -142,16 +142,6 @@ spec:
                         x-kubernetes-int-or-string: true
                     type: object
                 type: object
-              defaultAlerts:
-                default: true
-                description: defaultAlerts creates the standard platform alert rules
-                  (PrometheusRule).
-                type: boolean
-              defaultDashboards:
-                default: true
-                description: defaultDashboards creates the standard platform Grafana
-                  dashboard.
-                type: boolean
               destination:
                 description: |-
                   destination overrides where data is sent. Any endpoint left empty falls

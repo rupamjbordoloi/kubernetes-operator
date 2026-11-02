@@ -5,7 +5,6 @@
 # What Drishti creates from this:
 #   - OTel collector as a DaemonSet  (one per node: node + pod metrics, logs)
 #   - OTel collector as a Deployment (cluster-level metrics, events, gateway)
-#   - Standard "platform" dashboard and alerts (if enabled below)
 #
 # Minimal version (everything else uses defaults):
 #   apiVersion: monitoring.drishti.io/v1alpha1
@@ -28,12 +27,12 @@ spec:
   platform: gke
 
   # REQUIRED.
-  # Why: added as a label on every metric, so dashboards and alerts can tell
+  # Why: added as a label on every metric, so the backend can tell
   # clusters apart. Kubernetes doesn't reliably know its own "friendly" name.
   clusterName: hlr-gke-prod
 
   # OPTIONAL. Default: the environment set when Drishti was installed.
-  # Why: lets SREs filter dashboards by prod / uat / dev.
+  # Why: lets SREs filter data by prod / uat / dev.
   environment: prod
 
   # OPTIONAL. What to collect. Each item has its own default.
@@ -56,12 +55,6 @@ spec:
   #   traces:  http://tempo.observability.svc:4318
   #   logs:    http://loki.observability.svc:3100/otlp
 
-  # OPTIONAL. Default: true for both.
-  # Why: gives every cluster the standard platform dashboard and alerts with
-  # zero extra work. Use MonitoringDashboard / MonitoringAlert for custom ones.
-  defaultDashboards: true
-  defaultAlerts: true
-
   # OPTIONAL. CPU / memory for the collector pods.
   # Default: sized by Drishti per platform. Only change if collectors are
   # being throttled or killed for using too much memory.
@@ -82,5 +75,5 @@ spec:
 #     - type: Ready
 #       status: "True"
 #       reason: AllComponentsRunning
-#       message: "2 collectors, 1 dashboard, 6 alert rules created"
+#       message: "2 collectors created"
 # ---------------------------------------------------------------------

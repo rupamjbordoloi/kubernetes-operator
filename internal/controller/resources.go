@@ -61,12 +61,6 @@ func clusterRoleName(cm *monitoringv1alpha1.ClusterMonitoring) string {
 func sccBindingName(cm *monitoringv1alpha1.ClusterMonitoring) string {
 	return "drishti:" + cm.Name + ":scc-privileged"
 }
-func dashboardName(cm *monitoringv1alpha1.ClusterMonitoring) string {
-	return cm.Name + "-platform-dashboard"
-}
-func alertRuleName(cm *monitoringv1alpha1.ClusterMonitoring) string {
-	return cm.Name + "-platform-alerts"
-}
 
 // gatewayEndpoint is the in-cluster OTLP/gRPC address agents export to.
 func gatewayEndpoint(cm *monitoringv1alpha1.ClusterMonitoring, namespace string) string {

@@ -17,8 +17,6 @@ limitations under the License.
 package controller
 
 import (
-	"encoding/json"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -96,13 +94,5 @@ var _ = Describe("Collector config rendering", func() {
 		d := o.destination(cm)
 		Expect(d.Metrics).To(Equal("http://override-m"))
 		Expect(d.Logs).To(Equal("http://default-l"))
-	})
-
-	It("renders a valid dashboard JSON and six alert rules", func() {
-		cm := sampleCM(monitoringv1alpha1.CollectSpec{})
-		dash, err := renderDashboard(cm)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(json.Valid([]byte(dash))).To(BeTrue())
-		Expect(platformAlertRules(cm)).To(HaveLen(6))
 	})
 })

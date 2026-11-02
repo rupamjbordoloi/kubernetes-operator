@@ -52,7 +52,7 @@ type ClusterMonitoringSpec struct {
 	Platform Platform `json:"platform"`
 
 	// clusterName is added as the k8s.cluster.name label on every metric and
-	// log so dashboards and alerts can tell clusters apart.
+	// log so clusters can be told apart in the backend.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=63
@@ -80,16 +80,6 @@ type ClusterMonitoringSpec struct {
 	// back to the backend configured when the operator was installed.
 	// +optional
 	Destination *DestinationSpec `json:"destination,omitempty"`
-
-	// defaultDashboards creates the standard platform Grafana dashboard.
-	// +optional
-	// +kubebuilder:default=true
-	DefaultDashboards *bool `json:"defaultDashboards,omitempty"`
-
-	// defaultAlerts creates the standard platform alert rules (PrometheusRule).
-	// +optional
-	// +kubebuilder:default=true
-	DefaultAlerts *bool `json:"defaultAlerts,omitempty"`
 
 	// collectorResources overrides CPU / memory of the collector pods.
 	// Default: sized by the operator per platform.
@@ -229,9 +219,6 @@ func (c CollectSpec) NodesEnabled() bool  { return boolOr(c.Nodes, true) }
 func (c CollectSpec) PodsEnabled() bool   { return boolOr(c.Pods, true) }
 func (c CollectSpec) EventsEnabled() bool { return boolOr(c.Events, true) }
 func (c CollectSpec) LogsEnabled() bool   { return boolOr(c.Logs, false) }
-
-func (s ClusterMonitoringSpec) DashboardsEnabled() bool { return boolOr(s.DefaultDashboards, true) }
-func (s ClusterMonitoringSpec) AlertsEnabled() bool     { return boolOr(s.DefaultAlerts, true) }
 
 // Interval returns collectionInterval, defaulting to 30s.
 func (s ClusterMonitoringSpec) Interval() time.Duration {
