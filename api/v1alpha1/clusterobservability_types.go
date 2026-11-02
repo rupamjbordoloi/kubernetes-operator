@@ -1,19 +1,3 @@
-/*
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package v1alpha1
 
 import (
@@ -21,76 +5,64 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// ClusterObservabilitySpec defines the desired state of ClusterObservability
 type ClusterObservabilitySpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of ClusterObservability. Edit clusterobservability_types.go to remove/update
+	// Enables or disables cluster monitoring.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Controls log collection.
+	// +optional
+	Logs TelemetryConfig `json:"logs,omitempty"`
+
+	// Controls metric collection.
+	// +optional
+	Metrics TelemetryConfig `json:"metrics,omitempty"`
 }
 
-// ClusterObservabilityStatus defines the observed state of ClusterObservability.
-type ClusterObservabilityStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the ClusterObservability resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
+type TelemetryConfig struct {
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-
-// ClusterObservability is the Schema for the clusterobservabilities API
 type ClusterObservability struct {
-	metav1.TypeMeta `json:",inline"`
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// metadata is a standard object metadata
+	Spec ClusterObservabilitySpec `json:"spec,omitempty"`
+
+	Status ClusterObservabilityStatus `json:"status,omitempty"`
+}
+
+type ClusterObservabilityStatus struct {
 	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
+	Phase string `json:"phase,omitempty"`
 
-	// spec defines the desired state of ClusterObservability
-	// +required
-	Spec ClusterObservabilitySpec `json:"spec"`
-
-	// status defines the observed state of ClusterObservability
 	// +optional
-	Status ClusterObservabilityStatus `json:"status,omitzero"`
+	Message string `json:"message,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-
-// ClusterObservabilityList contains a list of ClusterObservability
 type ClusterObservabilityList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
-	Items           []ClusterObservability `json:"items"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+
+	Items []ClusterObservability `json:"items"`
 }
 
 func init() {
-	SchemeBuilder.Register(func(s *runtime.Scheme) error {
-		s.AddKnownTypes(SchemeGroupVersion, &ClusterObservability{}, &ClusterObservabilityList{})
-		return nil
-	})
+	SchemeBuilder.Register(
+		func(scheme *runtime.Scheme) error {
+			scheme.AddKnownTypes(
+				GroupVersion,
+				&ClusterObservability{},
+				&ClusterObservabilityList{},
+			)
+
+			metav1.AddToGroupVersion(scheme, GroupVersion)
+
+			return nil
+		},
+	)
 }
