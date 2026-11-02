@@ -1,0 +1,21 @@
+# Same object as yaml/cluster.yml, trimmed for a local kind cluster.
+# Logs are enabled here so the per-node log pipeline can be seen working.
+apiVersion: monitoring.drishti.io/v1alpha1
+kind: ClusterMonitoring
+metadata:
+  labels:
+    app.kubernetes.io/name: drishti
+    app.kubernetes.io/managed-by: kustomize
+  name: hlr-gke-prod
+spec:
+  platform: gke
+  clusterName: hlr-gke-prod
+  environment: prod
+  collect:
+    nodes: true
+    pods: true
+    events: true
+    logs: true
+  collectionInterval: 30s
+  defaultDashboards: true
+  defaultAlerts: true

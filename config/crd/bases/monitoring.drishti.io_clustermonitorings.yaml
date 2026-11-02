@@ -1,0 +1,268 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: clustermonitorings.monitoring.drishti.io
+spec:
+  group: monitoring.drishti.io
+  names:
+    kind: ClusterMonitoring
+    listKind: ClusterMonitoringList
+    plural: clustermonitorings
+    shortNames:
+    - cmon
+    singular: clustermonitoring
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.platform
+      name: Platform
+      type: string
+    - jsonPath: .spec.clusterName
+      name: Cluster
+      type: string
+    - jsonPath: .spec.environment
+      name: Env
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].message
+      name: Message
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ClusterMonitoring is the Schema for the clustermonitorings API.
+          One per cluster: it tells Drishti to monitor the whole cluster.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of ClusterMonitoring
+            properties:
+              clusterName:
+                description: |-
+                  clusterName is added as the k8s.cluster.name label on every metric and
+                  log so dashboards and alerts can tell clusters apart.
+                maxLength: 63
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: clusterName is immutable
+                  rule: self == oldSelf
+              collect:
+                default: {}
+                description: collect selects which signals are collected.
+                properties:
+                  events:
+                    default: true
+                    description: events collects Kubernetes events ("pod crashed",
+                      "image pull failed").
+                    type: boolean
+                  logs:
+                    default: false
+                    description: 'logs collects container logs from every node. Opt-in:
+                      high volume.'
+                    type: boolean
+                  nodes:
+                    default: true
+                    description: nodes collects CPU, memory and disk of each node.
+                    type: boolean
+                  pods:
+                    default: true
+                    description: pods collects CPU, memory and restarts of each pod.
+                    type: boolean
+                type: object
+              collectionInterval:
+                default: 30s
+                description: 'collectionInterval is how often metrics are scraped.
+                  Default: 30s.'
+                format: duration
+                type: string
+              collectorResources:
+                description: |-
+                  collectorResources overrides CPU / memory of the collector pods.
+                  Default: sized by the operator per platform.
+                properties:
+                  central:
+                    description: central sizes the Deployment collector (cluster metrics,
+                      events, gateway).
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  perNode:
+                    description: perNode sizes the DaemonSet collector (one pod per
+                      node).
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
+                type: object
+              defaultAlerts:
+                default: true
+                description: defaultAlerts creates the standard platform alert rules
+                  (PrometheusRule).
+                type: boolean
+              defaultDashboards:
+                default: true
+                description: defaultDashboards creates the standard platform Grafana
+                  dashboard.
+                type: boolean
+              destination:
+                description: |-
+                  destination overrides where data is sent. Any endpoint left empty falls
+                  back to the backend configured when the operator was installed.
+                properties:
+                  logs:
+                    description: logs OTLP/HTTP endpoint, e.g. http://loki.observability.svc:3100/otlp
+                    pattern: ^https?://
+                    type: string
+                  metrics:
+                    description: metrics OTLP/HTTP endpoint, e.g. http://mimir.observability.svc:9009/otlp
+                    pattern: ^https?://
+                    type: string
+                  traces:
+                    description: traces OTLP/HTTP endpoint, e.g. http://tempo.observability.svc:4318
+                    pattern: ^https?://
+                    type: string
+                type: object
+              environment:
+                description: |-
+                  environment (prod, uat, dev, ...) is added as the deployment.environment
+                  label. Defaults to the operator's --default-environment flag.
+                maxLength: 63
+                type: string
+              platform:
+                description: |-
+                  platform is the Kubernetes distribution. Each platform needs slightly
+                  different collector settings (e.g. OpenShift needs extra SCC permissions).
+                enum:
+                - gke
+                - eks
+                - ocp
+                type: string
+            required:
+            - clusterName
+            - platform
+            type: object
+          status:
+            description: status defines the observed state of ClusterMonitoring
+            properties:
+              conditions:
+                description: conditions represent the current state of the ClusterMonitoring
+                  resource.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: observedGeneration is the spec generation the status
+                  was computed from.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
