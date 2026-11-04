@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -144,6 +145,29 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal(monitoringv1alpha1.ReasonProgressing))
 		Expect(cond.Message).To(ContainSubstring("2 collectors created"))
+	})
+
+	It("requeues on an update conflict instead of reporting an error", func() {
+		createCR(resourceName, monitoringv1alpha1.CollectSpec{})
+		watchClient, err := client.NewWithWatch(cfg, client.Options{Scheme: k8sClient.Scheme()})
+		Expect(err).NotTo(HaveOccurred())
+		r := newReconciler()
+		r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*appsv1.Deployment); ok {
+					return errors.NewConflict(appsv1.Resource("deployments"), obj.GetName(), nil)
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		})
+
+		res, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(conflictRequeue))
+
+		cm := &monitoringv1alpha1.ClusterMonitoring{}
+		Expect(k8sClient.Get(ctx, key, cm)).To(Succeed())
+		Expect(meta.FindStatusCondition(cm.Status.Conditions, monitoringv1alpha1.ConditionReady)).To(BeNil())
 	})
 
 	It("removes the agent when nothing node-local is collected", func() {

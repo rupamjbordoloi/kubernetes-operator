@@ -42,6 +42,10 @@ import (
 // re-checks whether it has become the active one.
 const duplicateRequeue = time.Minute
 
+// conflictRequeue is the retry delay after an update conflict: a child was
+// changed (usually its status, by its own controller) after it was read.
+const conflictRequeue = time.Second
+
 // ClusterMonitoringReconciler reconciles a ClusterMonitoring object
 type ClusterMonitoringReconciler struct {
 	client.Client
@@ -104,6 +108,11 @@ func (r *ClusterMonitoringReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	sum, err := r.reconcileComponents(ctx, cm, opts)
+	if apierrors.IsConflict(err) {
+		// Expected while children roll out; the retry reads the latest version.
+		log.V(1).Info("Requeued after update conflict", "error", err.Error())
+		return ctrl.Result{RequeueAfter: conflictRequeue}, nil
+	}
 	if err != nil {
 		log.Error(err, "Failed to reconcile components")
 		if statusErr := r.setReady(ctx, cm, metav1.ConditionFalse,
