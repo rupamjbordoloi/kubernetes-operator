@@ -170,6 +170,25 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		Expect(meta.FindStatusCondition(cm.Status.Conditions, monitoringv1alpha1.ConditionReady)).To(BeNil())
 	})
 
+	It("does not rewrite the collectors when nothing changed", func() {
+		createCR(resourceName, monitoringv1alpha1.CollectSpec{Logs: ptr.To(true)})
+		reconcileOnce(resourceName)
+
+		agentKey := types.NamespacedName{Name: resourceName + "-agent", Namespace: ns}
+		gatewayKey := types.NamespacedName{Name: resourceName + "-gateway", Namespace: ns}
+		ds, dep := &appsv1.DaemonSet{}, &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, agentKey, ds)).To(Succeed())
+		Expect(k8sClient.Get(ctx, gatewayKey, dep)).To(Succeed())
+
+		reconcileOnce(resourceName)
+
+		dsAfter, depAfter := &appsv1.DaemonSet{}, &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, agentKey, dsAfter)).To(Succeed())
+		Expect(k8sClient.Get(ctx, gatewayKey, depAfter)).To(Succeed())
+		Expect(dsAfter.ResourceVersion).To(Equal(ds.ResourceVersion))
+		Expect(depAfter.ResourceVersion).To(Equal(dep.ResourceVersion))
+	})
+
 	It("removes the agent when nothing node-local is collected", func() {
 		createCR(resourceName, monitoringv1alpha1.CollectSpec{})
 		reconcileOnce(resourceName)
