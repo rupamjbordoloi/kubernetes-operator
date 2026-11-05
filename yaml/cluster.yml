@@ -50,10 +50,11 @@ spec:
   # Default: the backend configured when Drishti was installed (Helm values).
   # Why optional: SREs shouldn't need to know backend URLs. Only set this to
   # send one cluster's data somewhere different.
+  # The values below match the local stack in demo/infrastructure.
   # destination:
-  #   metrics: http://mimir.observability.svc:9009/otlp
-  #   traces:  http://tempo.observability.svc:4318
-  #   logs:    http://loki.observability.svc:3100/otlp
+  #   metrics: http://prometheus:9090/api/v1/otlp
+  #   traces:  http://tempo:4318
+  #   logs:    http://loki:3100/otlp
 
   # OPTIONAL. CPU / memory for the collector pods.
   # Default: sized by Drishti per platform. Only change if collectors are

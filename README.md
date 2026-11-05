@@ -26,8 +26,68 @@ The full annotated example is [yaml/cluster.yml](yaml/cluster.yml).
 
 ---
 
+## Quick start
+
+Local development from zero to dashboards. Run everything in **WSL**, from the repo root, with the tools in [1. Prerequisites](#1-prerequisites-wsl) installed and Docker Desktop running.
+
+**Terminal 1: cluster, backends, operator**
+
+```bash
+cd /mnt/d/rupam/go/kubernetes-operator
+
+# 1. Local cluster: 1 control plane + 2 workers. This also creates the "kind" Docker network.
+kind create cluster --name drishti --config yaml/kind-config.yaml
+
+# 2. Prometheus, Loki, Tempo and Grafana on the "kind" network (data is in memory only)
+docker compose -f demo/infrastructure/docker-compose.yaml up -d
+
+# 3. Point the operator at those backends
+export DRISHTI_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp DRISHTI_LOGS_ENDPOINT=http://loki:3100/otlp DRISHTI_TRACES_ENDPOINT=http://tempo:4318
+
+# 4. Install the CRD and run the operator from source (keep this terminal open)
+make install run
+```
+
+**Terminal 2: turn on monitoring and look at the data**
+
+```bash
+cd /mnt/d/rupam/go/kubernetes-operator
+
+# 5. Ask for monitoring of this cluster
+kubectl apply -f yaml/cluster.yml
+
+# 6. Wait until READY is True (about a minute: images are pulled first)
+kubectl get cmon -w
+
+# 7. The collectors: 3 agents (one per node) + 1 gateway
+kubectl -n drishti-system get pods -o wide
+
+# 8. Metrics have reached Prometheus
+curl -s 'http://localhost:9090/api/v1/query?query=count(k8s_node_cpu_usage)' ; echo
+```
+
+Open **Grafana at http://localhost:3000** (no login) → **Explore**:
+
+- Prometheus: `k8s_node_memory_working_set_bytes`
+- Loki (needs `events: true` or `logs: true` in the CR): `{k8s_cluster_name="hlr-gke-prod"}`
+
+**After changing Go code:** press Ctrl+C in terminal 1, then `make run` again. After changing `*_types.go`, run `make manifests generate install run`.
+
+**Clean up**
+
+```bash
+kubectl delete -f yaml/cluster.yml                              # removes every collector
+docker compose -f demo/infrastructure/docker-compose.yaml down  # stops the backends, data is discarded
+kind delete cluster --name drishti
+```
+
+The rest of this README explains each step in detail: [4. Run on a local kind cluster](#4-run-on-a-local-kind-cluster) and [5.1 Local stack](#51-local-stack-prometheus-loki-tempo-and-grafana).
+
+---
+
 ## Contents
 
+0. [Quick start](#quick-start)
 1. [Prerequisites (WSL)](#1-prerequisites-wsl)
 2. [How this project was scaffolded](#2-how-this-project-was-scaffolded)
 3. [Build and test](#3-build-and-test)
@@ -266,9 +326,9 @@ Backends are install-time settings, the "Helm values". SREs normally don't set t
 
 | Signal | Env var on the manager | Flag | Example |
 |---|---|---|---|
-| metrics | `DRISHTI_METRICS_ENDPOINT` | `--default-metrics-endpoint` | `http://mimir.observability.svc:9009/otlp` |
-| logs | `DRISHTI_LOGS_ENDPOINT` | `--default-logs-endpoint` | `http://loki.observability.svc:3100/otlp` |
-| traces | `DRISHTI_TRACES_ENDPOINT` | `--default-traces-endpoint` | `http://tempo.observability.svc:4318` |
+| metrics | `DRISHTI_METRICS_ENDPOINT` | `--default-metrics-endpoint` | `http://prometheus:9090/api/v1/otlp` |
+| logs | `DRISHTI_LOGS_ENDPOINT` | `--default-logs-endpoint` | `http://loki:3100/otlp` |
+| traces | `DRISHTI_TRACES_ENDPOINT` | `--default-traces-endpoint` | `http://tempo:4318` |
 | environment | `DRISHTI_DEFAULT_ENVIRONMENT` | `--default-environment` | `prod` |
 | collector image | `DRISHTI_COLLECTOR_IMAGE` | `--collector-image` | `otel/opentelemetry-collector-contrib:0.120.0` |
 
@@ -276,8 +336,9 @@ Set them permanently in [config/manager/manager.yaml](config/manager/manager.yam
 
 ```bash
 kubectl -n drishti-system set env deploy/drishti-controller-manager \
-  DRISHTI_METRICS_ENDPOINT=http://mimir.observability.svc:9009/otlp \
-  DRISHTI_LOGS_ENDPOINT=http://loki.observability.svc:3100/otlp
+  DRISHTI_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp \
+  DRISHTI_LOGS_ENDPOINT=http://loki:3100/otlp \
+  DRISHTI_TRACES_ENDPOINT=http://tempo:4318
 ```
 
 With `make run`, export the same variables before starting.
@@ -286,8 +347,59 @@ With `make run`, export the same variables before starting.
 
 **Backend notes**
 
-- *Mimir/Prometheus*: endpoints accept OTLP/HTTP; the collector appends `/v1/metrics`. The gateway copies `k8s.cluster.name` and `deployment.environment` onto every datapoint, so they appear as `k8s_cluster_name` / `deployment_environment` labels without any `promote_otel_resource_attributes` setting.
-- *Loki 3.x*: native OTLP at `/otlp`.
+- *Prometheus 3.x*: start it with `--web.enable-otlp-receiver`; the base URL is `/api/v1/otlp` and the collector appends `/v1/metrics`. The gateway copies `k8s.cluster.name` and `deployment.environment` onto every datapoint, so they appear as `k8s_cluster_name` / `deployment_environment` labels. Pod, namespace and node names are resource attributes: list them under `otlp.promote_resource_attributes` in `prometheus.yml` to get them as labels.
+- *Loki 3.x*: native OTLP at `/otlp`. Needs `allow_structured_metadata: true` (the default with schema v13).
+- *Tempo*: OTLP/HTTP on port 4318; the collector appends `/v1/traces`. Drishti collects no traces itself: Tempo receives what apps send to the gateway Service.
+
+### 5.1 Local stack: Prometheus, Loki, Tempo and Grafana
+
+[demo/infrastructure/](demo/infrastructure/) runs all four backends with Docker Compose next to the kind cluster:
+
+| Service | Receives | Browser |
+|---|---|---|
+| Prometheus | metrics (OTLP) | http://localhost:9090 |
+| Loki | logs and Kubernetes events (OTLP) | http://localhost:3100/ready |
+| Tempo | traces (OTLP) | http://localhost:3200/ready |
+| Grafana | nothing, it queries the other three | http://localhost:3000 (no login) |
+
+No extra OpenTelemetry Collector runs in Compose: the Drishti gateway is already one and sends OTLP straight to the backends.
+
+Every service joins the `kind` Docker network. kind makes Docker's DNS available to pods, so the gateway reaches them by name (`prometheus`, `loki`, `tempo`). The `kind` network exists only after a kind cluster is created, so start the cluster first.
+
+```bash
+# 1. Cluster (4.1), then the backends
+docker compose -f demo/infrastructure/docker-compose.yaml up -d
+docker compose -f demo/infrastructure/docker-compose.yaml ps     # all "running" / tempo-init "exited (0)"
+
+# 2. Operator with the backends as install-time defaults (Option A)
+export DRISHTI_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp
+export DRISHTI_LOGS_ENDPOINT=http://loki:3100/otlp
+export DRISHTI_TRACES_ENDPOINT=http://tempo:4318
+make install run
+```
+
+For Option B, use the `kubectl set env` command above after `make deploy`. If the operator is already running, restart it with the variables set; the gateway rolls to the new config on the next reconcile.
+
+Check that data arrives:
+
+```bash
+# The gateway config now has otlphttp exporters instead of debug
+kubectl -n drishti-system get cm hlr-gke-prod-gateway -o jsonpath='{.data.config\.yaml}' | grep -A1 otlphttp
+
+# The gateway can reach the backends (no "connection refused" / "no such host")
+kubectl -n drishti-system logs deploy/hlr-gke-prod-gateway | grep -i error
+
+# Metrics in Prometheus
+curl -s 'http://localhost:9090/api/v1/query?query=count(k8s_node_cpu_usage)' ; echo
+```
+
+Then in Grafana (http://localhost:3000 → **Explore**):
+
+- **Prometheus**: `k8s_node_memory_working_set_bytes`, or `sum by (k8s_pod_name) (k8s_pod_cpu_usage{k8s_namespace_name="drishti-system"})`
+- **Loki** (with `collect.events: true` and/or `collect.logs: true`): `{k8s_cluster_name="hlr-gke-prod"}`
+- **Tempo**: search for traces sent by your apps to `hlr-gke-prod-gateway.drishti-system.svc:4318`
+
+Stop the stack with `docker compose -f demo/infrastructure/docker-compose.yaml down`. Nothing is persisted: every service keeps its data in `tmpfs` (memory), so it is discarded whenever a container stops, including when Docker Desktop restarts. The containers come back empty on their own (`restart: unless-stopped`); Grafana re-provisions its datasources on every start.
 
 ---
 
@@ -327,7 +439,7 @@ flowchart LR
     APPS -- OTLP --> SVC
     API -- k8s_cluster + events --> GW
   end
-  GW -- OTLP/HTTP metrics --> MIMIR[(Mimir / Prometheus)]
+  GW -- OTLP/HTTP metrics --> PROM[(Prometheus)]
   GW -- OTLP/HTTP logs + events --> LOKI[(Loki)]
   GW -- OTLP/HTTP traces --> TEMPO[(Tempo)]
 ```
@@ -535,6 +647,7 @@ Full schema: [config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml](co
 │   ├── manager/manager.yaml            # operator Deployment + env defaults
 │   ├── default/                        # kustomize entry for make deploy (ns drishti-system)
 │   └── samples/                        # example CR (logs on)
+├── demo/infrastructure/                # docker compose: Prometheus, Loki, Tempo, Grafana (5.1)
 ├── yaml/
 │   ├── cluster.yml                     # the annotated ClusterMonitoring this operator implements
 │   └── kind-config.yaml                # 1 control-plane + 2 workers

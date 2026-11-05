@@ -152,7 +152,7 @@ spec:
                     pattern: ^https?://
                     type: string
                   metrics:
-                    description: metrics OTLP/HTTP endpoint, e.g. http://mimir.observability.svc:9009/otlp
+                    description: metrics OTLP/HTTP endpoint, e.g. http://prometheus.observability.svc:9090/api/v1/otlp
                     pattern: ^https?://
                     type: string
                   traces:

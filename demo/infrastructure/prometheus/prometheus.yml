@@ -1,0 +1,31 @@
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+# Metrics arrive over OTLP from the Drishti gateway. OTel keeps most context
+# (pod, namespace, node...) as resource attributes, which Prometheus would
+# otherwise only put on the target_info series. Promote the useful ones to
+# labels on every series. k8s.cluster.name and deployment.environment are
+# already copied onto each datapoint by the gateway.
+otlp:
+  promote_resource_attributes:
+    - k8s.node.name
+    - k8s.namespace.name
+    - k8s.pod.name
+    - k8s.container.name
+    - k8s.deployment.name
+    - k8s.statefulset.name
+    - k8s.daemonset.name
+    - k8s.job.name
+    - k8s.cronjob.name
+    - service.name
+
+storage:
+  tsdb:
+    # Agents batch and retry, so samples can arrive slightly out of order.
+    out_of_order_time_window: 30m
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

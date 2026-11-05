@@ -50,7 +50,7 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		return &ClusterMonitoringReconciler{
 			Client:  k8sClient,
 			Scheme:  k8sClient.Scheme(),
-			Options: Options{Destination: monitoringv1alpha1.DestinationSpec{Metrics: "http://mimir:9009/otlp"}},
+			Options: Options{Destination: monitoringv1alpha1.DestinationSpec{Metrics: "http://prometheus:9090/api/v1/otlp"}},
 		}
 	}
 
@@ -128,7 +128,7 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 			&corev1.Service{})).To(Succeed())
 		gwCM := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-gateway", Namespace: ns}, gwCM)).To(Succeed())
-		Expect(gwCM.Data[configFileName]).To(ContainSubstring("http://mimir:9009/otlp"))
+		Expect(gwCM.Data[configFileName]).To(ContainSubstring("http://prometheus:9090/api/v1/otlp"))
 		Expect(gwCM.Data[configFileName]).To(ContainSubstring("k8sobjects"))
 
 		By("creating cluster-wide RBAC for the collectors")

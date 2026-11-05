@@ -113,7 +113,7 @@ type CollectSpec struct {
 
 // DestinationSpec holds OTLP/HTTP base URLs per signal.
 type DestinationSpec struct {
-	// metrics OTLP/HTTP endpoint, e.g. http://mimir.observability.svc:9009/otlp
+	// metrics OTLP/HTTP endpoint, e.g. http://prometheus.observability.svc:9090/api/v1/otlp
 	// +optional
 	// +kubebuilder:validation:Pattern=`^https?://`
 	Metrics string `json:"metrics,omitempty"`

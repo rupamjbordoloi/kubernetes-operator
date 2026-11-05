@@ -1,0 +1,85 @@
+# Local observability backend for the Drishti operator running on kind.
+#
+#   Prometheus  metrics  (OTLP receiver)   http://localhost:9090
+#   Loki        logs     (OTLP receiver)   http://localhost:3100
+#   Tempo       traces   (OTLP receiver)   http://localhost:3200
+#   Grafana     UI, all three datasources  http://localhost:3000
+#
+# No extra OTel Collector is needed: the operator's gateway is already an OTel
+# Collector and exports OTLP/HTTP straight to these services.
+#
+# Every service joins the "kind" Docker network, which `kind create cluster`
+# creates. Pods in the cluster reach the services by name, for example
+# http://prometheus:9090. Create the kind cluster before starting this stack.
+#
+# Nothing is kept: data lives in tmpfs (memory) and is gone whenever a
+# container stops, including when Docker restarts. mode=1777 lets each image's
+# own non-root user write there.
+#
+#   docker compose -f demo/infrastructure/docker-compose.yaml up -d
+name: drishti-demo
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Accept OTLP/HTTP at /api/v1/otlp/v1/metrics.
+      - --web.enable-otlp-receiver
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    tmpfs:
+      - /prometheus:mode=1777
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.5.0
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/loki.yaml:/etc/loki/loki.yaml:ro
+    tmpfs:
+      - /loki:mode=1777
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.8.0
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "3200:3200"   # query API (used by Grafana)
+      - "4317:4317"   # OTLP gRPC, for apps running outside the cluster
+      - "4318:4318"   # OTLP HTTP, for apps running outside the cluster
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    tmpfs:
+      - /var/tempo:mode=1777
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    environment:
+      # Local demo only: no login, everyone is admin.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    tmpfs:
+      - /var/lib/grafana:mode=1777
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    restart: unless-stopped
+
+networks:
+  default:
+    name: kind
+    external: true
