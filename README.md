@@ -69,7 +69,8 @@ curl -s 'http://localhost:9090/api/v1/query?query=count(k8s_node_cpu_usage)' ; e
 Open **Grafana at http://localhost:3000** (no login) → **Explore**:
 
 - Prometheus: `k8s_node_memory_working_set_bytes`
-- Loki (needs `events: true` or `logs: true` in the CR): `{k8s_cluster_name="hlr-gke-prod"}`
+- Loki, Kubernetes events (needs `events: true` in the CR): `{service_name="kubernetes-events"}`
+- Loki, container logs (needs `logs: true` in the CR): `{k8s_namespace_name="kube-system"}`
 
 **After changing Go code:** press Ctrl+C in terminal 1, then `make run` again. After changing `*_types.go`, run `make manifests generate install run`.
 
@@ -396,7 +397,7 @@ curl -s 'http://localhost:9090/api/v1/query?query=count(k8s_node_cpu_usage)' ; e
 Then in Grafana (http://localhost:3000 → **Explore**):
 
 - **Prometheus**: `k8s_node_memory_working_set_bytes`, or `sum by (k8s_pod_name) (k8s_pod_cpu_usage{k8s_namespace_name="drishti-system"})`
-- **Loki** (with `collect.events: true` and/or `collect.logs: true`): `{k8s_cluster_name="hlr-gke-prod"}`
+- **Loki**, everything from this cluster: `{k8s_cluster_name="hlr-gke-prod"}`. Only Kubernetes events (`collect.events: true`): `{service_name="kubernetes-events"}`, or warnings only: `{service_name="kubernetes-events"} | json | object_type="Warning"`. Container logs (`collect.logs: true`) are named after their container, e.g. `{service_name="coredns"}`.
 - **Tempo**: search for traces sent by your apps to `hlr-gke-prod-gateway.drishti-system.svc:4318`
 
 Stop the stack with `docker compose -f demo/infrastructure/docker-compose.yaml down`. Nothing is persisted: every service keeps its data in `tmpfs` (memory), so it is discarded whenever a container stops, including when Docker Desktop restarts. The containers come back empty on their own (`restart: unless-stopped`); Grafana re-provisions its datasources on every start.
@@ -463,9 +464,11 @@ Processors: `memory_limiter` → `k8sattributes` (adds deployment / statefulset 
 |---|---|---|
 | `otlp` | always | Receives agent data and any app's OTLP traffic (4317 gRPC / 4318 HTTP) |
 | `k8s_cluster` | `collect.nodes` or `collect.pods` | Object state: pod phase, container restarts, node conditions, deployment desired/available, and more. `distribution: openshift` on OCP adds ClusterResourceQuota metrics. |
-| `k8sobjects` | `collect.events` | Kubernetes events (`events.k8s.io`) in watch mode, as log records |
+| `k8sobjects` | `collect.events` | Kubernetes events (`events.k8s.io`) in watch mode, as log records. `DELETED` watch records are dropped: they are Kubernetes expiring old events (about 1h TTL), not something that happened. |
 
 Processors: `memory_limiter` → `resource/cluster` (upserts `k8s.cluster.name`, `deployment.environment`) → `transform/labels` (metrics only: copies them onto each datapoint) → `batch`. Exporters: one `otlphttp/<signal>` per configured backend, otherwise `debug`.
+
+Events have their own pipeline, `logs/events`, with two extra processors: `resource/events` sets `service.name: kubernetes-events` (without it Loki files them under `unknown_service`), and `transform/events` removes `metadata.managedFields`, which is API server bookkeeping. Container and app logs arrive over OTLP in the `logs` pipeline and are not touched by either. Both pipelines share the same `otlphttp/logs` exporter.
 
 **Why a gateway instead of agents exporting directly?**
 
@@ -595,7 +598,7 @@ Step by step for `kubectl apply -f yaml/cluster.yml`:
 | `spec.environment` | string (≤63) | no | `--default-environment` (`dev`) | `deployment.environment` label |
 | `spec.collect.nodes` | bool | no | `true` | kubeletstats `node` + k8s_cluster |
 | `spec.collect.pods` | bool | no | `true` | kubeletstats `pod`, `container` + k8s_cluster |
-| `spec.collect.events` | bool | no | `true` | k8sobjects events → logs pipeline |
+| `spec.collect.events` | bool | no | `true` | k8sobjects events → `logs/events` pipeline, `service.name: kubernetes-events` |
 | `spec.collect.logs` | bool | no | `false` | filelog on every node (root + hostPath) |
 | `spec.collectionInterval` | duration | no | `30s` | kubeletstats + k8s_cluster interval |
 | `spec.destination.metrics` | URL `^https?://` | no | install default | OTLP/HTTP base URL |

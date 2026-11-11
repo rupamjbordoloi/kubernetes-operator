@@ -79,11 +79,27 @@ var _ = Describe("Collector config rendering", func() {
 		Expect(cfg).To(ContainSubstring("value: prod"))
 	})
 
+	It("sends events through their own pipeline with a service name", func() {
+		cfg, err := renderGatewayConfig(sampleCM(monitoringv1alpha1.CollectSpec{}), "prod",
+			monitoringv1alpha1.DestinationSpec{Logs: "http://loki:3100/otlp"})
+		Expect(err).NotTo(HaveOccurred())
+		p := pipelinesOf(cfg)
+		Expect(p["logs/events"]).To(HaveKeyWithValue("receivers", ConsistOf("k8sobjects")))
+		Expect(p["logs/events"]).To(HaveKeyWithValue("exporters", ConsistOf("otlphttp/logs")))
+		Expect(p["logs"]).To(HaveKeyWithValue("receivers", ConsistOf("otlp")))
+		Expect(p["logs"]).To(HaveKeyWithValue("processors", Not(ContainElement("resource/events"))))
+		Expect(cfg).To(ContainSubstring("value: " + eventsServiceName))
+		Expect(cfg).To(ContainSubstring("- DELETED"))
+		Expect(cfg).To(ContainSubstring("managedFields"))
+	})
+
 	It("drops the events receiver when events are off", func() {
 		cfg, err := renderGatewayConfig(sampleCM(monitoringv1alpha1.CollectSpec{Events: ptr.To(false)}), "prod",
 			monitoringv1alpha1.DestinationSpec{Logs: "http://loki:3100/otlp"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg).NotTo(ContainSubstring("k8sobjects"))
+		Expect(cfg).NotTo(ContainSubstring("resource/events"))
+		Expect(pipelinesOf(cfg)).NotTo(HaveKey("logs/events"))
 		Expect(cfg).To(ContainSubstring("otlphttp/logs"))
 	})
 

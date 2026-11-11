@@ -30,6 +30,9 @@ const (
 	healthPort   = 13133
 
 	configFileName = "config.yaml"
+
+	// eventsServiceName is the service.name given to Kubernetes events.
+	eventsServiceName = "kubernetes-events"
 )
 
 // m keeps the collector config literals readable.
@@ -165,7 +168,6 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 		}},
 	}
 	metricsReceivers := []string{"otlp"}
-	logsReceivers := []string{"otlp"}
 
 	if c.NodesEnabled() || c.PodsEnabled() {
 		k8sCluster := m{
@@ -180,17 +182,34 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 		receivers["k8s_cluster"] = k8sCluster
 		metricsReceivers = append(metricsReceivers, "k8s_cluster")
 	}
+	processors := cfg["processors"].(m)
 	if c.EventsEnabled() {
 		receivers["k8sobjects"] = m{
 			"auth_type": "serviceAccount",
 			"objects": []any{
-				m{"name": "events", "mode": "watch", "group": "events.k8s.io"},
+				m{
+					"name": "events", "mode": "watch", "group": "events.k8s.io",
+					// DELETED is Kubernetes expiring an old Event (about 1h TTL),
+					// not something that happened in the cluster.
+					"exclude_watch_type": []string{"DELETED"},
+				},
 			},
 		}
-		logsReceivers = append(logsReceivers, "k8sobjects")
+		// Events carry no service attributes, so Loki would file them under
+		// unknown_service. Only fill it in: never override a real service.name.
+		processors["resource/events"] = m{"attributes": []any{
+			m{"key": "service.name", "value": eventsServiceName, "action": "insert"},
+		}}
+		// managedFields is API server bookkeeping and most of each record.
+		processors["transform/events"] = m{
+			"error_mode": "ignore",
+			"log_statements": []any{m{
+				"context":    "log",
+				"statements": []string{`delete_key(body["object"]["metadata"], "managedFields")`},
+			}},
+		}
 	}
 
-	processors := cfg["processors"].(m)
 	processors["resource/cluster"] = m{"attributes": []any{
 		m{"key": "k8s.cluster.name", "value": cm.Spec.ClusterName, "action": "upsert"},
 		m{"key": "deployment.environment", "value": environment, "action": "upsert"},
@@ -223,12 +242,20 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 	}
 
 	common := []string{"memory_limiter", "resource/cluster", "batch"}
+	logsExporter := exporterFor("logs", dest.Logs)
 	pipelines := m{
 		"metrics": pipeline(metricsReceivers,
 			[]string{"memory_limiter", "resource/cluster", "transform/labels", "batch"},
 			[]string{exporterFor("metrics", dest.Metrics)}),
-		"logs":   pipeline(logsReceivers, common, []string{exporterFor("logs", dest.Logs)}),
+		"logs":   pipeline([]string{"otlp"}, common, []string{logsExporter}),
 		"traces": pipeline([]string{"otlp"}, common, []string{exporterFor("traces", dest.Traces)}),
+	}
+	// Events get their own pipeline so the events-only processors never touch
+	// container or app logs arriving over OTLP.
+	if c.EventsEnabled() {
+		pipelines["logs/events"] = pipeline([]string{"k8sobjects"},
+			[]string{"memory_limiter", "resource/cluster", "resource/events", "transform/events", "batch"},
+			[]string{logsExporter})
 	}
 
 	cfg["receivers"] = receivers
