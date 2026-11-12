@@ -83,6 +83,10 @@ func hash(s string) string {
 
 // ---- RBAC for the collectors ------------------------------------------------
 
+// eventsResource is the "events" resource, in both the core and events.k8s.io
+// API groups.
+const eventsResource = "events"
+
 // collectorRules is what kubeletstats, k8sattributes, k8s_cluster and
 // k8sobjects need. The operator must hold every one of these itself
 // (see the rbac markers in the controller) or the API server refuses to
@@ -91,7 +95,7 @@ func collectorRules(cm *monitoringv1alpha1.ClusterMonitoring) []rbacv1.PolicyRul
 	read := []string{"get", "list", "watch"}
 	rules := []rbacv1.PolicyRule{
 		{APIGroups: []string{""}, Verbs: read, Resources: []string{
-			"nodes", "nodes/stats", "nodes/proxy", "pods", "namespaces", "events", "services",
+			"nodes", "nodes/stats", "nodes/proxy", "pods", "namespaces", eventsResource, "services",
 			"endpoints", "replicationcontrollers", "resourcequotas",
 			"persistentvolumes", "persistentvolumeclaims",
 		}},
@@ -100,7 +104,7 @@ func collectorRules(cm *monitoringv1alpha1.ClusterMonitoring) []rbacv1.PolicyRul
 		}},
 		{APIGroups: []string{"batch"}, Verbs: read, Resources: []string{"jobs", "cronjobs"}},
 		{APIGroups: []string{"autoscaling"}, Verbs: read, Resources: []string{"horizontalpodautoscalers"}},
-		{APIGroups: []string{"events.k8s.io"}, Verbs: read, Resources: []string{"events"}},
+		{APIGroups: []string{"events.k8s.io"}, Verbs: read, Resources: []string{eventsResource}},
 	}
 	if cm.Spec.Platform == monitoringv1alpha1.PlatformOCP {
 		rules = append(rules, rbacv1.PolicyRule{
@@ -128,12 +132,16 @@ func mutateClusterRoleBinding(cm *monitoringv1alpha1.ClusterMonitoring, crb *rba
 
 type size struct{ cpu, memory string }
 
+// gatewaySize is the same on every platform: its load depends on the number
+// of nodes and apps, not on the platform.
+var gatewaySize = size{"500m", "1Gi"}
+
 // defaultSizes are per platform. OpenShift clusters usually run more pods per
 // node, so the agent's k8sattributes cache gets a bit more memory.
 var defaultSizes = map[monitoringv1alpha1.Platform]struct{ perNode, central size }{
-	monitoringv1alpha1.PlatformGKE: {size{"200m", "256Mi"}, size{"500m", "1Gi"}},
-	monitoringv1alpha1.PlatformEKS: {size{"200m", "256Mi"}, size{"500m", "1Gi"}},
-	monitoringv1alpha1.PlatformOCP: {size{"250m", "384Mi"}, size{"500m", "1Gi"}},
+	monitoringv1alpha1.PlatformGKE: {size{"200m", "256Mi"}, gatewaySize},
+	monitoringv1alpha1.PlatformEKS: {size{"200m", "256Mi"}, gatewaySize},
+	monitoringv1alpha1.PlatformOCP: {size{"250m", "384Mi"}, gatewaySize},
 }
 
 // resources returns requests == limits (Guaranteed QoS), so memory_limiter
@@ -208,7 +216,7 @@ func configVolume(configMapName string) corev1.Volume {
 // UID is left to the SCC, which assigns one from the namespace range.
 func podSecurity(cm *monitoringv1alpha1.ClusterMonitoring) *corev1.PodSecurityContext {
 	sc := &corev1.PodSecurityContext{
-		RunAsNonRoot:   ptr.To(true),
+		RunAsNonRoot:   new(true),
 		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 	if cm.Spec.Platform != monitoringv1alpha1.PlatformOCP {
@@ -219,8 +227,8 @@ func podSecurity(cm *monitoringv1alpha1.ClusterMonitoring) *corev1.PodSecurityCo
 
 func restrictedContainerSecurity() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
-		AllowPrivilegeEscalation: ptr.To(false),
-		ReadOnlyRootFilesystem:   ptr.To(true),
+		AllowPrivilegeEscalation: new(false),
+		ReadOnlyRootFilesystem:   new(true),
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 	}
 }
@@ -251,13 +259,13 @@ func mutateAgentDaemonSet(cm *monitoringv1alpha1.ClusterMonitoring, ds *appsv1.D
 		}})
 		container.VolumeMounts = append(container.VolumeMounts,
 			corev1.VolumeMount{Name: "varlogpods", MountPath: "/var/log/pods", ReadOnly: true})
-		podSec.RunAsNonRoot = ptr.To(false)
+		podSec.RunAsNonRoot = new(false)
 		podSec.RunAsUser = ptr.To[int64](0)
 		if cm.Spec.Platform == monitoringv1alpha1.PlatformOCP {
 			// SELinux on OpenShift blocks hostPath reads unless privileged;
 			// the controller binds the SA to the privileged SCC for this.
-			container.SecurityContext.Privileged = ptr.To(true)
-			container.SecurityContext.AllowPrivilegeEscalation = ptr.To(true)
+			container.SecurityContext.Privileged = new(true)
+			container.SecurityContext.AllowPrivilegeEscalation = new(true)
 		}
 	}
 
@@ -265,7 +273,7 @@ func mutateAgentDaemonSet(cm *monitoringv1alpha1.ClusterMonitoring, ds *appsv1.D
 	ds.Spec.UpdateStrategy = appsv1.DaemonSetUpdateStrategy{
 		Type: appsv1.RollingUpdateDaemonSetStrategyType,
 		RollingUpdate: &appsv1.RollingUpdateDaemonSet{
-			MaxUnavailable: ptr.To(intstr.FromString("25%")),
+			MaxUnavailable: new(intstr.FromString("25%")),
 		},
 	}
 	ds.Spec.Template = corev1.PodTemplateSpec{

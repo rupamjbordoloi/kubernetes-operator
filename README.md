@@ -445,6 +445,25 @@ flowchart LR
   GW -- OTLP/HTTP traces --> TEMPO[(Tempo)]
 ```
 
+**How it works, in short**
+
+> The operator creates a **gateway Deployment** and an **agent DaemonSet**, both running the OpenTelemetry Collector **contrib image**, each with a **config the operator generates** (in a ConfigMap), plus RBAC and a Service.
+>
+> - **Agents** **poll** their node's kubelet every 30s for CPU, memory, disk and network (and tail logs if enabled), then send it to the gateway.
+> - The **gateway** uses **list + watch** on the API server to keep a live copy of cluster **objects**. It turns that copy into **state metrics** every 30s, and turns **events** into logs as they arrive.
+>
+> In both collectors, data goes through **processors** (`memory_limiter` → labels → `batch`, which waits up to 5s or 8192 items), then gets **exported**: agents to the gateway, and the gateway to Prometheus, Loki and Tempo.
+
+```
+kubelet ──poll 30s──► agent ──batch──OTLP──┐
+                                           ▼
+API server ──list+watch──► gateway ◄───────┘
+                    (objects → metrics every 30s, events → logs at once)
+                              │ memory_limiter → add cluster labels → batch
+                              ▼
+                    Prometheus / Loki / Tempo
+```
+
 ### 6.3 The two collectors
 
 Both run the **OpenTelemetry Collector contrib** image. They differ only in the config the operator writes.
@@ -478,7 +497,98 @@ Events have their own pipeline, `logs/events`, with two extra processors: `resou
 
 **Why one replica?** Two gateways would both run `k8s_cluster` / `k8sobjects` and double every cluster metric and event. Scaling out the OTLP path is a future change: split it into a separate, horizontally scaled Deployment.
 
-### 6.4 Key design decisions
+### 6.4 Metrics collected
+
+Everything below is collected every `collectionInterval` (default 30s). The lists match the collector image the operator deploys (`otel/opentelemetry-collector-contrib:0.120.0`). Each receiver's full reference is in its `documentation.md` upstream: [kubeletstats](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.120.0/receiver/kubeletstatsreceiver/documentation.md), [k8s_cluster](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.120.0/receiver/k8sclusterreceiver/documentation.md).
+
+**Labels on every metric**
+
+| Label | Added by |
+|---|---|
+| `k8s.cluster.name`, `deployment.environment` | gateway (`resource/cluster`, copied onto each datapoint by `transform/labels`) |
+| `k8s.node.name`, `k8s.namespace.name`, `k8s.pod.name`, `k8s.pod.uid`, `k8s.container.name` | the receiver, where the metric is about that object |
+| `k8s.deployment.name`, `k8s.statefulset.name`, `k8s.daemonset.name`, `k8s.job.name`, `k8s.cronjob.name` | agent (`k8sattributes`), for pod and container metrics |
+
+#### Agent (DaemonSet): usage, from each node's kubelet
+
+Receiver `kubeletstats`. `collect.nodes` turns on the **Node** column, and `collect.pods` turns on the **Pod** and **Container** columns. Every node reports only its own node, pods and containers.
+
+| Metric (`<prefix>` = `k8s.node`, `k8s.pod` or `container`) | Unit | Node | Pod | Container | Meaning |
+|---|---|:-:|:-:|:-:|---|
+| `<prefix>.cpu.usage` | cores | ✓ | ✓ | ✓ | CPU in use right now, for example `0.25` = a quarter of one core. Turned on by the operator (off by default upstream). |
+| `<prefix>.cpu.time` | seconds, cumulative | ✓ | ✓ | ✓ | Total CPU time used since start. Use `rate()` on it. |
+| `<prefix>.memory.usage` | bytes | ✓ | ✓ | ✓ | All memory in use, including page cache |
+| `<prefix>.memory.working_set` | bytes | ✓ | ✓ | ✓ | Memory that can't be freed. **This is what the OOM killer and `kubectl top` use.** |
+| `<prefix>.memory.rss` | bytes | ✓ | ✓ | ✓ | Anonymous memory (heap and stack), excluding cache |
+| `<prefix>.memory.available` | bytes | ✓ | ✓ | ✓ | Memory left before the limit (pod/container) or node capacity |
+| `<prefix>.memory.page_faults` | count | ✓ | ✓ | ✓ | Page faults |
+| `<prefix>.memory.major_page_faults` | count | ✓ | ✓ | ✓ | Page faults that had to read from disk |
+| `<prefix>.filesystem.usage` | bytes | ✓ | ✓ | ✓ | Disk used (node root disk, pod volumes and logs, container writable layer) |
+| `<prefix>.filesystem.capacity` | bytes | ✓ | ✓ | ✓ | Disk size |
+| `<prefix>.filesystem.available` | bytes | ✓ | ✓ | ✓ | Disk free |
+| `<prefix>.network.io` | bytes, cumulative | ✓ | ✓ | | Bytes sent and received. Labels: `interface`, `direction` (`receive` / `transmit`). |
+| `<prefix>.network.errors` | count, cumulative | ✓ | ✓ | | Network errors. Same labels. |
+
+That's 13 node, 13 pod and 11 container metrics.
+
+**Deliberately not collected**
+
+| Metric | Why |
+|---|---|
+| `*.cpu.utilization` | Deprecated duplicate of `*.cpu.usage` with a misleading name (it's cores, not a 0 to 1 ratio). Turned off by the operator. |
+| `k8s.volume.*` | The `volume` metric group isn't enabled. Pod volume usage is already in `k8s.pod.filesystem.*`. |
+| `*_limit_utilization`, `*_request_utilization`, `*.node.utilization`, `*.uptime` | Optional upstream and off by default. They can be computed from `*.cpu.usage` / `*.memory.working_set` and the `k8s_cluster` limit and request metrics below. |
+
+#### Gateway (Deployment): state, from the API server
+
+Receiver `k8s_cluster`, turned on by `collect.nodes` **or** `collect.pods`. It reads object specs and statuses from the API server, so it reports what Kubernetes *wants* and *thinks*, not what is being used. It reports on the whole cluster, all namespaces.
+
+| Object | Metrics | Meaning |
+|---|---|---|
+| Node | `k8s.node.condition_ready`, `k8s.node.condition_memory_pressure`, `k8s.node.condition_disk_pressure`, `k8s.node.condition_pid_pressure` | `1` = condition is True, `0` = False, `-1` = Unknown. Chosen by `node_conditions_to_report` in the gateway config. |
+| Namespace | `k8s.namespace.phase` | `1` = Active, `0` = Terminating |
+| Pod | `k8s.pod.phase` | `1` Pending, `2` Running, `3` Succeeded, `4` Failed, `5` Unknown |
+| Container | `k8s.container.ready` | `1` = passing its readiness probe |
+| | `k8s.container.restarts` | Restart count. Treat it as "0 vs. more than 0": kubelet can reset it. |
+| | `k8s.container.cpu_request`, `k8s.container.cpu_limit` | From the pod spec, in cores |
+| | `k8s.container.memory_request`, `k8s.container.memory_limit` | From the pod spec, in bytes |
+| | `k8s.container.ephemeralstorage_request` / `_limit`, `k8s.container.storage_request` / `_limit` | From the pod spec, in bytes (only if set) |
+| Deployment | `k8s.deployment.desired`, `k8s.deployment.available` | Pods wanted vs. pods ready |
+| ReplicaSet | `k8s.replicaset.desired`, `k8s.replicaset.available` | Same, per ReplicaSet |
+| ReplicationController | `k8s.replication_controller.desired`, `k8s.replication_controller.available` | Same, for the legacy kind |
+| StatefulSet | `k8s.statefulset.desired_pods`, `k8s.statefulset.ready_pods`, `k8s.statefulset.current_pods`, `k8s.statefulset.updated_pods` | Pods wanted, ready, on the current revision, and updated |
+| DaemonSet | `k8s.daemonset.desired_scheduled_nodes`, `k8s.daemonset.current_scheduled_nodes`, `k8s.daemonset.ready_nodes`, `k8s.daemonset.misscheduled_nodes` | Nodes that should run it, do run it, are ready, and run it but shouldn't |
+| Job | `k8s.job.active_pods`, `k8s.job.successful_pods`, `k8s.job.failed_pods`, `k8s.job.desired_successful_pods`, `k8s.job.max_parallel_pods` | Job progress |
+| CronJob | `k8s.cronjob.active_jobs` | Jobs currently running |
+| HPA | `k8s.hpa.current_replicas`, `k8s.hpa.desired_replicas`, `k8s.hpa.min_replicas`, `k8s.hpa.max_replicas` | Autoscaler state |
+| ResourceQuota | `k8s.resource_quota.hard_limit`, `k8s.resource_quota.used` | Per namespace and resource, only where a quota exists. CPU is in millicores. |
+| ClusterResourceQuota (**OpenShift only**) | `openshift.clusterquota.limit` / `.used`, `openshift.appliedclusterquota.limit` / `.used` | Added by `distribution: openshift` when `platform: ocp` |
+
+`k8s_cluster` runs only in the gateway, once per cluster. In every agent it would report the same cluster state N times.
+
+#### Metrics from apps
+
+The gateway also forwards any metrics an app sends over OTLP to `<gateway>:4317` / `:4318` (see 6.2). Those are whatever the app defines. Drishti only adds the cluster labels.
+
+#### Metric names in Prometheus
+
+Prometheus' OTLP receiver rewrites the names: dots become underscores, and a unit suffix is added (`_bytes`, `_seconds`; `_total` for cumulative counters; `_ratio` for unitless gauges). Units in braces, like `{cpu}` or `{pod}`, are dropped. For example:
+
+| OTel name | Prometheus name |
+|---|---|
+| `k8s.pod.cpu.usage` | `k8s_pod_cpu_usage` |
+| `container.memory.working_set` | `container_memory_working_set_bytes` |
+| `k8s.node.cpu.time` | `k8s_node_cpu_time_seconds_total` |
+| `k8s.pod.network.io` | `k8s_pod_network_io_bytes_total` |
+| `k8s.deployment.available` | `k8s_deployment_available` |
+
+Labels get the same treatment (`k8s.namespace.name` → `k8s_namespace_name`). To see every name that has actually arrived, open Grafana **Explore → Prometheus → Metrics browser**, or run:
+
+```bash
+curl -s http://localhost:9090/api/v1/label/__name__/values | tr ',' '\n' | grep -E 'k8s_|container_'
+```
+
+### 6.5 Key design decisions
 
 | Decision | Why |
 |---|---|
@@ -494,7 +604,7 @@ Events have their own pipeline, `logs/events`, with two extra processors: `resou
 | **Label-filtered manager cache** | The manager only caches ConfigMaps, Services, Deployments and so on that carry `app.kubernetes.io/managed-by=drishti`. Without this it would cache every such object in the cluster. |
 | **Collectors run in the operator namespace** | One place for RBAC, Pod Security labels and network policy. `ensureNamespace` creates it for `make run`, and the operator never deletes it. |
 
-### 6.5 Platform differences
+### 6.6 Platform differences
 
 | | GKE | EKS | OpenShift (ocp) |
 |---|---|---|---|
@@ -504,14 +614,14 @@ Events have their own pipeline, `logs/events`, with two extra processors: `resou
 | `k8s_cluster` | default | default | `distribution: openshift` (+ `clusterresourcequotas` read RBAC) |
 | default sizes (agent / gateway) | 200m, 256Mi / 500m, 1Gi | 200m, 256Mi / 500m, 1Gi | 250m, 384Mi / 500m, 1Gi |
 
-### 6.6 Security and RBAC
+### 6.7 Security and RBAC
 
 - **Collector ClusterRole** (`drishti:<name>:collector`) is read-only (`get/list/watch`): nodes, `nodes/stats`, `nodes/proxy`, pods, namespaces, events, services, endpoints, RCs, quotas, PVs, PVCs; apps/*; batch/*; HPAs; `events.k8s.io` events; plus OpenShift quotas on `ocp`.
 - **Operator role**: Kubernetes RBAC refuses to let a subject grant permissions it doesn't hold (escalation prevention). The operator's [role.yaml](config/rbac/role.yaml), generated from the `+kubebuilder:rbac` markers, therefore includes those read rules too, plus `use` on the `privileged` SCC (OpenShift only) so it can create that binding. It doesn't use the `escalate` or `bind` verbs.
 - **Pod security**: the gateway, and the agent without logs, run non-root, with a read-only root filesystem, all capabilities dropped and `RuntimeDefault` seccomp. Log collection needs root and a hostPath mount, so the collector namespace is labelled `pod-security.kubernetes.io/enforce: privileged`.
 - **Transport**: agent → gateway is in-cluster plaintext gRPC. Add mTLS or a NetworkPolicy if your threat model needs it.
 
-### 6.7 Status
+### 6.8 Status
 
 ```yaml
 status:
@@ -532,7 +642,7 @@ status:
 
 Changes to owned DaemonSet/Deployment status re-trigger reconcile, so `Ready` follows pod health without polling. Status is only written when it changes, so the controller doesn't loop on its own writes.
 
-### 6.8 Known limitations / next steps
+### 6.9 Known limitations / next steps
 
 - Log tailing starts `at: end` with no checkpoint storage, so lines written while an agent pod restarts are lost. Next step: the `file_storage` extension on a hostPath.
 - The gateway is a single replica, so there is a short gap during its rollout.
@@ -607,7 +717,7 @@ Step by step for `kubectl apply -f yaml/cluster.yml`:
 | `spec.collectorResources.perNode.{cpu,memory}` | quantity | no | per platform | Agent requests = limits |
 | `spec.collectorResources.central.{cpu,memory}` | quantity | no | per platform | Gateway requests = limits |
 | `status.observedGeneration` | int | | | |
-| `status.conditions[type=Ready]` | Condition | | | See [6.7](#67-status) |
+| `status.conditions[type=Ready]` | Condition | | | See [6.8](#68-status) |
 
 Full schema: [config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml](config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml), or run `kubectl explain clustermonitoring.spec --recursive`.
 

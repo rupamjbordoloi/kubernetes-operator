@@ -1,9 +1,10 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -125,14 +126,13 @@ func (r *ClusterMonitoringReconciler) activeName(ctx context.Context) (string, e
 	if len(items) == 0 {
 		return "", nil
 	}
-	sort.Slice(items, func(i, j int) bool {
-		ti, tj := items[i].CreationTimestamp, items[j].CreationTimestamp
-		if !ti.Equal(&tj) {
-			return ti.Before(&tj)
-		}
-		return items[i].Name < items[j].Name
+	oldest := slices.MinFunc(items, func(a, b monitoringv1alpha1.ClusterMonitoring) int {
+		return cmp.Or(
+			a.CreationTimestamp.Compare(b.CreationTimestamp.Time),
+			cmp.Compare(a.Name, b.Name),
+		)
 	})
-	return items[0].Name, nil
+	return oldest.Name, nil
 }
 
 func (r *ClusterMonitoringReconciler) reconcileComponents(ctx context.Context,

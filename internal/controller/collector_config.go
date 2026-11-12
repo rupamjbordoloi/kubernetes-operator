@@ -19,6 +19,26 @@ const (
 	eventsServiceName = "kubernetes-events"
 )
 
+// Collector component IDs. Pipelines refer to components by these IDs, so a
+// typo would only show up when the collector refuses to start.
+const (
+	otlpReceiver    = "otlp"
+	memoryLimiter   = "memory_limiter"
+	batchProcessor  = "batch"
+	gatewayExporter = "otlp/gateway"
+	// clusterLabels stamps k8s.cluster.name and deployment.environment.
+	clusterLabels = "resource/cluster"
+)
+
+// Config keys used by several components.
+const (
+	keyEndpoint = "endpoint"
+	keyAuthType = "auth_type"
+	// serviceAccountAuth makes a component call the API server or kubelet
+	// with the pod's service account token.
+	serviceAccountAuth = "serviceAccount"
+)
+
 // m keeps the collector config literals readable.
 type m = map[string]any
 
@@ -32,20 +52,44 @@ func pipeline(receivers, processors, exporters []string) m {
 	return m{"receivers": receivers, "processors": processors, "exporters": exporters}
 }
 
+// service is the top-level "service" section: the health check plus pipelines.
+func service(pipelines m) m {
+	return m{"extensions": []string{"health_check"}, "pipelines": pipelines}
+}
+
+// attribute is one entry of a resource processor: set key to value, where
+// action is "insert" (only if missing) or "upsert" (always).
+func attribute(key, value, action string) m {
+	return m{"key": key, "value": value, "action": action}
+}
+
+// metricToggles turns individual metrics on or off, as the "metrics" setting
+// of a receiver expects.
+func metricToggles(on, off []string) m {
+	out := m{}
+	for _, name := range on {
+		out[name] = m{"enabled": true}
+	}
+	for _, name := range off {
+		out[name] = m{"enabled": false}
+	}
+	return out
+}
+
 // baseConfig holds the pieces shared by both collectors.
 func baseConfig() m {
 	return m{
 		"extensions": m{
-			"health_check": m{"endpoint": fmt.Sprintf("0.0.0.0:%d", healthPort)},
+			"health_check": m{keyEndpoint: fmt.Sprintf("0.0.0.0:%d", healthPort)},
 		},
 		"processors": m{
 			// Uses the container memory limit, so the pod sheds load before OOM.
-			"memory_limiter": m{
+			memoryLimiter: m{
 				"check_interval":         "1s",
 				"limit_percentage":       80,
 				"spike_limit_percentage": 25,
 			},
-			"batch": m{"send_batch_size": 8192, "timeout": "5s"},
+			batchProcessor: m{"send_batch_size": 8192, "timeout": "5s"},
 		},
 	}
 }
@@ -61,7 +105,7 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 
 	processors := cfg["processors"].(m)
 	processors["k8sattributes"] = m{
-		"auth_type":   "serviceAccount",
+		keyAuthType:   serviceAccountAuth,
 		"passthrough": false,
 		// Only watch pods on this node: keeps memory flat on large clusters.
 		"filter": m{"node_from_env_var": "K8S_NODE_NAME"},
@@ -79,9 +123,9 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 	}
 
 	exporters := m{
-		"otlp/gateway": m{"endpoint": gatewayEndpoint, "tls": m{"insecure": true}},
+		gatewayExporter: m{keyEndpoint: gatewayEndpoint, "tls": m{"insecure": true}},
 	}
-	agentProcessors := []string{"memory_limiter", "k8sattributes", "batch"}
+	agentProcessors := []string{memoryLimiter, "k8sattributes", batchProcessor}
 
 	if c.NodesEnabled() || c.PodsEnabled() {
 		var groups []string
@@ -93,24 +137,20 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 		}
 		receivers["kubeletstats"] = m{
 			"collection_interval": cm.Spec.Interval().String(),
-			"auth_type":           "serviceAccount",
+			keyAuthType:           serviceAccountAuth,
 			// hostIP works on every platform; kubelet serving certs are often
 			// self-signed (GKE, kind), hence insecure_skip_verify.
-			"endpoint":             "https://${env:K8S_NODE_IP}:10250",
+			keyEndpoint:            "https://${env:K8S_NODE_IP}:10250",
 			"insecure_skip_verify": true,
 			"metric_groups":        groups,
 			// Use the *.cpu.usage metrics; the *.cpu.utilization ones are
 			// deprecated but still on by default and log a warning.
-			"metrics": m{
-				"k8s.node.cpu.usage":        m{"enabled": true},
-				"k8s.pod.cpu.usage":         m{"enabled": true},
-				"container.cpu.usage":       m{"enabled": true},
-				"k8s.node.cpu.utilization":  m{"enabled": false},
-				"k8s.pod.cpu.utilization":   m{"enabled": false},
-				"container.cpu.utilization": m{"enabled": false},
-			},
+			"metrics": metricToggles(
+				[]string{"k8s.node.cpu.usage", "k8s.pod.cpu.usage", "container.cpu.usage"},
+				[]string{"k8s.node.cpu.utilization", "k8s.pod.cpu.utilization", "container.cpu.utilization"},
+			),
 		}
-		pipelines["metrics"] = pipeline([]string{"kubeletstats"}, agentProcessors, []string{"otlp/gateway"})
+		pipelines["metrics"] = pipeline([]string{"kubeletstats"}, agentProcessors, []string{gatewayExporter})
 	}
 
 	if c.LogsEnabled() {
@@ -127,12 +167,12 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 				m{"type": "container", "id": "container-parser"},
 			},
 		}
-		pipelines["logs"] = pipeline([]string{"filelog"}, agentProcessors, []string{"otlp/gateway"})
+		pipelines["logs"] = pipeline([]string{"filelog"}, agentProcessors, []string{gatewayExporter})
 	}
 
 	cfg["receivers"] = receivers
 	cfg["exporters"] = exporters
-	cfg["service"] = m{"extensions": []string{"health_check"}, "pipelines": pipelines}
+	cfg["service"] = service(pipelines)
 	return marshal(cfg)
 }
 
@@ -146,16 +186,16 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 	cfg := baseConfig()
 
 	receivers := m{
-		"otlp": m{"protocols": m{
-			"grpc": m{"endpoint": fmt.Sprintf("0.0.0.0:%d", otlpGRPCPort)},
-			"http": m{"endpoint": fmt.Sprintf("0.0.0.0:%d", otlpHTTPPort)},
+		otlpReceiver: m{"protocols": m{
+			"grpc": m{keyEndpoint: fmt.Sprintf("0.0.0.0:%d", otlpGRPCPort)},
+			"http": m{keyEndpoint: fmt.Sprintf("0.0.0.0:%d", otlpHTTPPort)},
 		}},
 	}
-	metricsReceivers := []string{"otlp"}
+	metricsReceivers := []string{otlpReceiver}
 
 	if c.NodesEnabled() || c.PodsEnabled() {
 		k8sCluster := m{
-			"auth_type":                 "serviceAccount",
+			keyAuthType:                 serviceAccountAuth,
 			"collection_interval":       cm.Spec.Interval().String(),
 			"node_conditions_to_report": []string{"Ready", "MemoryPressure", "DiskPressure", "PIDPressure"},
 		}
@@ -169,10 +209,10 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 	processors := cfg["processors"].(m)
 	if c.EventsEnabled() {
 		receivers["k8sobjects"] = m{
-			"auth_type": "serviceAccount",
+			keyAuthType: serviceAccountAuth,
 			"objects": []any{
 				m{
-					"name": "events", "mode": "watch", "group": "events.k8s.io",
+					"name": eventsResource, "mode": "watch", "group": "events.k8s.io",
 					// DELETED is Kubernetes expiring an old Event (about 1h TTL),
 					// not something that happened in the cluster.
 					"exclude_watch_type": []string{"DELETED"},
@@ -182,7 +222,7 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 		// Events carry no service attributes, so Loki would file them under
 		// unknown_service. Only fill it in: never override a real service.name.
 		processors["resource/events"] = m{"attributes": []any{
-			m{"key": "service.name", "value": eventsServiceName, "action": "insert"},
+			attribute("service.name", eventsServiceName, "insert"),
 		}}
 		// managedFields is API server bookkeeping and most of each record.
 		processors["transform/events"] = m{
@@ -194,9 +234,9 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 		}
 	}
 
-	processors["resource/cluster"] = m{"attributes": []any{
-		m{"key": "k8s.cluster.name", "value": cm.Spec.ClusterName, "action": "upsert"},
-		m{"key": "deployment.environment", "value": environment, "action": "upsert"},
+	processors[clusterLabels] = m{"attributes": []any{
+		attribute("k8s.cluster.name", cm.Spec.ClusterName, "upsert"),
+		attribute("deployment.environment", environment, "upsert"),
 	}}
 	// Prometheus-style backends keep resource attributes out of series labels
 	// by default. Copy the two we filter on onto every datapoint so queries can
@@ -221,30 +261,30 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 			return "debug"
 		}
 		name := "otlphttp/" + signal
-		exporters[name] = m{"endpoint": endpoint}
+		exporters[name] = m{keyEndpoint: endpoint}
 		return name
 	}
 
-	common := []string{"memory_limiter", "resource/cluster", "batch"}
+	common := []string{memoryLimiter, clusterLabels, batchProcessor}
 	logsExporter := exporterFor("logs", dest.Logs)
 	pipelines := m{
 		"metrics": pipeline(metricsReceivers,
-			[]string{"memory_limiter", "resource/cluster", "transform/labels", "batch"},
+			[]string{memoryLimiter, clusterLabels, "transform/labels", batchProcessor},
 			[]string{exporterFor("metrics", dest.Metrics)}),
-		"logs":   pipeline([]string{"otlp"}, common, []string{logsExporter}),
-		"traces": pipeline([]string{"otlp"}, common, []string{exporterFor("traces", dest.Traces)}),
+		"logs":   pipeline([]string{otlpReceiver}, common, []string{logsExporter}),
+		"traces": pipeline([]string{otlpReceiver}, common, []string{exporterFor("traces", dest.Traces)}),
 	}
 	// Events get their own pipeline so the events-only processors never touch
 	// container or app logs arriving over OTLP.
 	if c.EventsEnabled() {
 		pipelines["logs/events"] = pipeline([]string{"k8sobjects"},
-			[]string{"memory_limiter", "resource/cluster", "resource/events", "transform/events", "batch"},
+			[]string{memoryLimiter, clusterLabels, "resource/events", "transform/events", batchProcessor},
 			[]string{logsExporter})
 	}
 
 	cfg["receivers"] = receivers
 	cfg["exporters"] = exporters
-	cfg["service"] = m{"extensions": []string{"health_check"}, "pipelines": pipelines}
+	cfg["service"] = service(pipelines)
 	return marshal(cfg)
 }
 

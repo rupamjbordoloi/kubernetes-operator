@@ -12,7 +12,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -48,7 +47,7 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: name},
 			Spec: monitoringv1alpha1.ClusterMonitoringSpec{
 				Platform:    monitoringv1alpha1.PlatformGKE,
-				ClusterName: "hlr-gke-prod",
+				ClusterName: resourceName,
 				Environment: "prod",
 				Collect:     collect,
 			},
@@ -88,13 +87,13 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		createCR(resourceName, monitoringv1alpha1.CollectSpec{})
 		cm := &monitoringv1alpha1.ClusterMonitoring{}
 		Expect(k8sClient.Get(ctx, key, cm)).To(Succeed())
-		Expect(cm.Spec.Collect.Nodes).To(Equal(ptr.To(true)))
-		Expect(cm.Spec.Collect.Logs).To(Equal(ptr.To(false)))
+		Expect(cm.Spec.Collect.Nodes).To(Equal(new(true)))
+		Expect(cm.Spec.Collect.Logs).To(Equal(new(false)))
 		Expect(cm.Spec.CollectionInterval.Duration).To(Equal(30 * time.Second))
 	})
 
 	It("creates collectors and RBAC, and reports progress", func() {
-		createCR(resourceName, monitoringv1alpha1.CollectSpec{Logs: ptr.To(true)})
+		createCR(resourceName, monitoringv1alpha1.CollectSpec{Logs: new(true)})
 		reconcileOnce(resourceName)
 
 		By("creating the per-node agent with the log volume")
@@ -155,7 +154,7 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 	})
 
 	It("does not rewrite the collectors when nothing changed", func() {
-		createCR(resourceName, monitoringv1alpha1.CollectSpec{Logs: ptr.To(true)})
+		createCR(resourceName, monitoringv1alpha1.CollectSpec{Logs: new(true)})
 		reconcileOnce(resourceName)
 
 		agentKey := types.NamespacedName{Name: resourceName + "-agent", Namespace: ns}
@@ -182,7 +181,7 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		cm := &monitoringv1alpha1.ClusterMonitoring{}
 		Expect(k8sClient.Get(ctx, key, cm)).To(Succeed())
 		cm.Spec.Collect = monitoringv1alpha1.CollectSpec{
-			Nodes: ptr.To(false), Pods: ptr.To(false), Logs: ptr.To(false), Events: ptr.To(true),
+			Nodes: new(false), Pods: new(false), Logs: new(false), Events: new(true),
 		}
 		Expect(k8sClient.Update(ctx, cm)).To(Succeed())
 		reconcileOnce(resourceName)

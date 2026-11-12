@@ -84,7 +84,8 @@ func main() {
 		envOr("DRISHTI_DEFAULT_ENVIRONMENT", controller.DefaultEnvironment),
 		"Environment label used when a ClusterMonitoring does not set spec.environment.")
 	flag.StringVar(&drishtiOpts.Destination.Metrics, "default-metrics-endpoint", os.Getenv("DRISHTI_METRICS_ENDPOINT"),
-		"Default OTLP/HTTP metrics endpoint (e.g. http://prometheus.observability.svc:9090/api/v1/otlp). Empty = debug exporter.")
+		"Default OTLP/HTTP metrics endpoint (e.g. http://prometheus.observability.svc:9090/api/v1/otlp). "+
+			"Empty = debug exporter.")
 	flag.StringVar(&drishtiOpts.Destination.Logs, "default-logs-endpoint", os.Getenv("DRISHTI_LOGS_ENDPOINT"),
 		"Default OTLP/HTTP logs endpoint (e.g. http://loki.observability.svc:3100/otlp). Empty = debug exporter.")
 	flag.StringVar(&drishtiOpts.Destination.Traces, "default-traces-endpoint", os.Getenv("DRISHTI_TRACES_ENDPOINT"),
@@ -203,7 +204,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	setupLog.Info("Drishti defaults", "collectorNamespace", drishtiOpts.Namespace, "collectorImage", drishtiOpts.CollectorImage,
+	setupLog.Info("Drishti defaults",
+		"collectorNamespace", drishtiOpts.Namespace, "collectorImage", drishtiOpts.CollectorImage,
 		"environment", drishtiOpts.Environment, "metricsEndpoint", drishtiOpts.Destination.Metrics,
 		"logsEndpoint", drishtiOpts.Destination.Logs, "tracesEndpoint", drishtiOpts.Destination.Traces)
 	if err := (&controller.ClusterMonitoringReconciler{

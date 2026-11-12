@@ -4,7 +4,6 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/yaml"
 
 	monitoringv1alpha1 "github.com/hdfc/drishti-operator/api/v1alpha1"
@@ -38,7 +37,7 @@ var _ = Describe("Collector config rendering", func() {
 	})
 
 	It("adds a logs pipeline and excludes the agent's own logs when logs are on", func() {
-		cfg, err := renderAgentConfig(sampleCM(monitoringv1alpha1.CollectSpec{Logs: ptr.To(true)}),
+		cfg, err := renderAgentConfig(sampleCM(monitoringv1alpha1.CollectSpec{Logs: new(true)}),
 			"gw:4317", "drishti-system")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pipelinesOf(cfg)).To(HaveKey("logs"))
@@ -46,7 +45,7 @@ var _ = Describe("Collector config rendering", func() {
 	})
 
 	It("only asks kubelet for node stats when pods are off", func() {
-		cfg, err := renderAgentConfig(sampleCM(monitoringv1alpha1.CollectSpec{Pods: ptr.To(false)}),
+		cfg, err := renderAgentConfig(sampleCM(monitoringv1alpha1.CollectSpec{Pods: new(false)}),
 			"gw:4317", "drishti-system")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg).To(ContainSubstring("- node"))
@@ -78,7 +77,7 @@ var _ = Describe("Collector config rendering", func() {
 	})
 
 	It("drops the events receiver when events are off", func() {
-		cfg, err := renderGatewayConfig(sampleCM(monitoringv1alpha1.CollectSpec{Events: ptr.To(false)}), "prod",
+		cfg, err := renderGatewayConfig(sampleCM(monitoringv1alpha1.CollectSpec{Events: new(false)}), "prod",
 			monitoringv1alpha1.DestinationSpec{Logs: "http://loki:3100/otlp"})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg).NotTo(ContainSubstring("k8sobjects"))
