@@ -309,12 +309,12 @@ kind delete cluster --name drishti
 
 ### 4.8 Check the collector configs offline (optional)
 
-To check the generated configs against the exact collector version without a cluster, download `otelcol-contrib` v0.120.0 and validate them:
+To check the generated configs against the exact collector version without a cluster, download `otelcol-contrib` v0.165.0 and validate them:
 
 ```bash
 mkdir -p ~/otel && cd ~/otel
-curl -sSLO https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.120.0/otelcol-contrib_0.120.0_linux_amd64.tar.gz
-tar xzf otelcol-contrib_0.120.0_linux_amd64.tar.gz otelcol-contrib
+curl -sSLO https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.165.0/otelcol-contrib_0.165.0_linux_amd64.tar.gz
+tar xzf otelcol-contrib_0.165.0_linux_amd64.tar.gz otelcol-contrib
 kubectl -n drishti-system get cm hlr-gke-prod-gateway -o jsonpath='{.data.config\.yaml}' > gateway.yaml
 ./otelcol-contrib validate --config=gateway.yaml
 ```
@@ -331,7 +331,7 @@ Backends are install-time settings, the "Helm values". SREs normally don't set t
 | logs | `DRISHTI_LOGS_ENDPOINT` | `--default-logs-endpoint` | `http://loki:3100/otlp` |
 | traces | `DRISHTI_TRACES_ENDPOINT` | `--default-traces-endpoint` | `http://tempo:4318` |
 | environment | `DRISHTI_DEFAULT_ENVIRONMENT` | `--default-environment` | `prod` |
-| collector image | `DRISHTI_COLLECTOR_IMAGE` | `--collector-image` | `otel/opentelemetry-collector-contrib:0.120.0` |
+| collector image | `DRISHTI_COLLECTOR_IMAGE` | `--collector-image` | `otel/opentelemetry-collector-contrib:0.165.0` |
 
 Set them permanently in [config/manager/manager.yaml](config/manager/manager.yaml), or on a running install:
 
@@ -384,8 +384,8 @@ For Option B, use the `kubectl set env` command above after `make deploy`. If th
 Check that data arrives:
 
 ```bash
-# The gateway config now has otlphttp exporters instead of debug
-kubectl -n drishti-system get cm hlr-gke-prod-gateway -o jsonpath='{.data.config\.yaml}' | grep -A1 otlphttp
+# The gateway config now has otlp_http exporters instead of debug
+kubectl -n drishti-system get cm hlr-gke-prod-gateway -o jsonpath='{.data.config\.yaml}' | grep -A1 otlp_http
 
 # The gateway can reach the backends (no "connection refused" / "no such host")
 kubectl -n drishti-system logs deploy/hlr-gke-prod-gateway | grep -i error
@@ -475,7 +475,7 @@ Both run the **OpenTelemetry Collector contrib** image. They differ only in the 
 | `kubeletstats` | `collect.nodes` (group `node`), `collect.pods` (groups `pod`, `container`) | CPU, memory, filesystem and network per node, pod and container, read from the local kubelet at `https://$K8S_NODE_IP:10250` using the SA token |
 | `filelog` | `collect.logs` | Every container log line under `/var/log/pods/*/*/*.log`, parsed by the `container` operator (docker / containerd / cri-o). The agent's own logs are excluded to prevent a feedback loop. |
 
-Processors: `memory_limiter` → `k8sattributes` (adds deployment / statefulset / daemonset / job names, watching only pods on its own node) → `batch`. Exporter: OTLP gRPC to the gateway Service.
+Processors: `memory_limiter` → `k8sattributes` (adds deployment / statefulset / daemonset / job names, watching only pods on its own node) → `batch`. Exporter: `otlp_grpc/gateway`, OTLP gRPC to the gateway Service.
 
 **Gateway (Deployment, exactly 1 replica), cluster-wide work and egress**
 
@@ -485,9 +485,9 @@ Processors: `memory_limiter` → `k8sattributes` (adds deployment / statefulset 
 | `k8s_cluster` | `collect.nodes` or `collect.pods` | Object state: pod phase, container restarts, node conditions, deployment desired/available, and more. `distribution: openshift` on OCP adds ClusterResourceQuota metrics. |
 | `k8sobjects` | `collect.events` | Kubernetes events (`events.k8s.io`) in watch mode, as log records. `DELETED` watch records are dropped: they are Kubernetes expiring old events (about 1h TTL), not something that happened. |
 
-Processors: `memory_limiter` → `resource/cluster` (upserts `k8s.cluster.name`, `deployment.environment`) → `transform/labels` (metrics only: copies them onto each datapoint) → `batch`. Exporters: one `otlphttp/<signal>` per configured backend, otherwise `debug`.
+Processors: `memory_limiter` → `resource/cluster` (upserts `k8s.cluster.name`, `deployment.environment`) → `transform/labels` (metrics only: copies them onto each datapoint) → `batch`. Exporters: one `otlp_http/<signal>` per configured backend, otherwise `debug`.
 
-Events have their own pipeline, `logs/events`, with two extra processors: `resource/events` sets `service.name: kubernetes-events` (without it Loki files them under `unknown_service`), and `transform/events` removes `metadata.managedFields`, which is API server bookkeeping. Container and app logs arrive over OTLP in the `logs` pipeline and are not touched by either. Both pipelines share the same `otlphttp/logs` exporter.
+Events have their own pipeline, `logs/events`, with two extra processors: `resource/events` sets `service.name: kubernetes-events` (without it Loki files them under `unknown_service`), and `transform/events` removes `metadata.managedFields`, which is API server bookkeeping. Container and app logs arrive over OTLP in the `logs` pipeline and are not touched by either. Both pipelines share the same `otlp_http/logs` exporter.
 
 **Why a gateway instead of agents exporting directly?**
 
@@ -499,7 +499,7 @@ Events have their own pipeline, `logs/events`, with two extra processors: `resou
 
 ### 6.4 Metrics collected
 
-Everything below is collected every `collectionInterval` (default 30s). The lists match the collector image the operator deploys (`otel/opentelemetry-collector-contrib:0.120.0`). Each receiver's full reference is in its `documentation.md` upstream: [kubeletstats](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.120.0/receiver/kubeletstatsreceiver/documentation.md), [k8s_cluster](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.120.0/receiver/k8sclusterreceiver/documentation.md).
+Everything below is collected every `collectionInterval` (default 30s). The lists match the collector image the operator deploys (`otel/opentelemetry-collector-contrib:0.165.0`). Each receiver's full reference is in its `documentation.md` upstream: [kubeletstats](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.165.0/receiver/kubeletstatsreceiver/documentation.md), [k8s_cluster](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.165.0/receiver/k8sclusterreceiver/documentation.md).
 
 **Labels on every metric**
 
@@ -515,7 +515,7 @@ Receiver `kubeletstats`. `collect.nodes` turns on the **Node** column, and `coll
 
 | Metric (`<prefix>` = `k8s.node`, `k8s.pod` or `container`) | Unit | Node | Pod | Container | Meaning |
 |---|---|:-:|:-:|:-:|---|
-| `<prefix>.cpu.usage` | cores | ✓ | ✓ | ✓ | CPU in use right now, for example `0.25` = a quarter of one core. Turned on by the operator (off by default upstream). |
+| `<prefix>.cpu.usage` | cores | ✓ | ✓ | ✓ | CPU in use right now, for example `0.25` = a quarter of one core. |
 | `<prefix>.cpu.time` | seconds, cumulative | ✓ | ✓ | ✓ | Total CPU time used since start. Use `rate()` on it. |
 | `<prefix>.memory.usage` | bytes | ✓ | ✓ | ✓ | All memory in use, including page cache |
 | `<prefix>.memory.working_set` | bytes | ✓ | ✓ | ✓ | Memory that can't be freed. **This is what the OOM killer and `kubectl top` use.** |
@@ -535,7 +535,7 @@ That's 13 node, 13 pod and 11 container metrics.
 
 | Metric | Why |
 |---|---|
-| `*.cpu.utilization` | Deprecated duplicate of `*.cpu.usage` with a misleading name (it's cores, not a 0 to 1 ratio). Turned off by the operator. |
+| `*.cpu.utilization` | Removed upstream (it was a misnamed duplicate of `*.cpu.usage`: cores, not a 0 to 1 ratio). |
 | `k8s.volume.*` | The `volume` metric group isn't enabled. Pod volume usage is already in `k8s.pod.filesystem.*`. |
 | `*_limit_utilization`, `*_request_utilization`, `*.node.utilization`, `*.uptime` | Optional upstream and off by default. They can be computed from `*.cpu.usage` / `*.memory.working_set` and the `k8s_cluster` limit and request metrics below. |
 

@@ -25,7 +25,10 @@ const (
 	otlpReceiver    = "otlp"
 	memoryLimiter   = "memory_limiter"
 	batchProcessor  = "batch"
-	gatewayExporter = "otlp/gateway"
+	gatewayExporter = "otlp_grpc/gateway"
+	// backendExporter is the prefix of the gateway's per-signal exporters,
+	// e.g. otlp_http/metrics.
+	backendExporter = "otlp_http/"
 	// clusterLabels stamps k8s.cluster.name and deployment.environment.
 	clusterLabels = "resource/cluster"
 )
@@ -61,19 +64,6 @@ func service(pipelines m) m {
 // action is "insert" (only if missing) or "upsert" (always).
 func attribute(key, value, action string) m {
 	return m{"key": key, "value": value, "action": action}
-}
-
-// metricToggles turns individual metrics on or off, as the "metrics" setting
-// of a receiver expects.
-func metricToggles(on, off []string) m {
-	out := m{}
-	for _, name := range on {
-		out[name] = m{"enabled": true}
-	}
-	for _, name := range off {
-		out[name] = m{"enabled": false}
-	}
-	return out
 }
 
 // baseConfig holds the pieces shared by both collectors.
@@ -143,12 +133,6 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 			keyEndpoint:            "https://${env:K8S_NODE_IP}:10250",
 			"insecure_skip_verify": true,
 			"metric_groups":        groups,
-			// Use the *.cpu.usage metrics; the *.cpu.utilization ones are
-			// deprecated but still on by default and log a warning.
-			"metrics": metricToggles(
-				[]string{"k8s.node.cpu.usage", "k8s.pod.cpu.usage", "container.cpu.usage"},
-				[]string{"k8s.node.cpu.utilization", "k8s.pod.cpu.utilization", "container.cpu.utilization"},
-			),
 		}
 		pipelines["metrics"] = pipeline([]string{"kubeletstats"}, agentProcessors, []string{gatewayExporter})
 	}
@@ -260,7 +244,7 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 			exporters["debug"] = m{"verbosity": "basic"}
 			return "debug"
 		}
-		name := "otlphttp/" + signal
+		name := backendExporter + signal
 		exporters[name] = m{keyEndpoint: endpoint}
 		return name
 	}

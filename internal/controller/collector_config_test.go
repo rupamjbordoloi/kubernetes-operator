@@ -34,6 +34,9 @@ var _ = Describe("Collector config rendering", func() {
 		Expect(p).To(HaveKey("metrics"))
 		Expect(p).NotTo(HaveKey("logs"))
 		Expect(cfg).To(ContainSubstring("collection_interval: 30s"))
+		Expect(p["metrics"]).To(HaveKeyWithValue("exporters", ConsistOf(gatewayExporter)))
+		// Removed from kubeletstats in newer collectors: naming one fails startup.
+		Expect(cfg).NotTo(ContainSubstring("cpu.utilization"))
 	})
 
 	It("adds a logs pipeline and excludes the agent's own logs when logs are on", func() {
@@ -57,7 +60,7 @@ var _ = Describe("Collector config rendering", func() {
 			monitoringv1alpha1.DestinationSpec{})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg).To(ContainSubstring("debug:"))
-		Expect(cfg).NotTo(ContainSubstring("otlphttp"))
+		Expect(cfg).NotTo(ContainSubstring("otlp_http"))
 		Expect(cfg).To(ContainSubstring("value: hlr-gke-prod"))
 		Expect(cfg).To(ContainSubstring("value: prod"))
 	})
@@ -68,7 +71,7 @@ var _ = Describe("Collector config rendering", func() {
 		Expect(err).NotTo(HaveOccurred())
 		p := pipelinesOf(cfg)
 		Expect(p["logs/events"]).To(HaveKeyWithValue("receivers", ConsistOf("k8sobjects")))
-		Expect(p["logs/events"]).To(HaveKeyWithValue("exporters", ConsistOf("otlphttp/logs")))
+		Expect(p["logs/events"]).To(HaveKeyWithValue("exporters", ConsistOf("otlp_http/logs")))
 		Expect(p["logs"]).To(HaveKeyWithValue("receivers", ConsistOf("otlp")))
 		Expect(p["logs"]).To(HaveKeyWithValue("processors", Not(ContainElement("resource/events"))))
 		Expect(cfg).To(ContainSubstring("value: " + eventsServiceName))
@@ -83,7 +86,7 @@ var _ = Describe("Collector config rendering", func() {
 		Expect(cfg).NotTo(ContainSubstring("k8sobjects"))
 		Expect(cfg).NotTo(ContainSubstring("resource/events"))
 		Expect(pipelinesOf(cfg)).NotTo(HaveKey("logs/events"))
-		Expect(cfg).To(ContainSubstring("otlphttp/logs"))
+		Expect(cfg).To(ContainSubstring("otlp_http/logs"))
 	})
 
 	It("lets the CR destination override install defaults per signal", func() {

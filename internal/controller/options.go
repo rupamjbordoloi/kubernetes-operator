@@ -12,7 +12,7 @@ const (
 	// DefaultCollectorImage is the OpenTelemetry Collector (contrib) image.
 	// The contrib distribution is required for kubeletstats, k8s_cluster,
 	// k8sobjects, k8sattributes and filelog.
-	DefaultCollectorImage = "otel/opentelemetry-collector-contrib:0.120.0"
+	DefaultCollectorImage = "otel/opentelemetry-collector-contrib:0.165.0"
 
 	// DefaultEnvironment is used when neither the CR nor the flag set one.
 	DefaultEnvironment = "dev"
