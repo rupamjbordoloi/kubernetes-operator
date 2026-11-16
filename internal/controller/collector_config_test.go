@@ -35,7 +35,7 @@ var _ = Describe("Collector config rendering", func() {
 		Expect(p).NotTo(HaveKey("logs"))
 		Expect(cfg).To(ContainSubstring("collection_interval: 30s"))
 		Expect(p["metrics"]).To(HaveKeyWithValue("exporters", ConsistOf(gatewayExporter)))
-		// Removed from kubeletstats in newer collectors: naming one fails startup.
+		// Removed from kubelet_stats in newer collectors: naming one fails startup.
 		Expect(cfg).NotTo(ContainSubstring("cpu.utilization"))
 	})
 
@@ -70,7 +70,7 @@ var _ = Describe("Collector config rendering", func() {
 			monitoringv1alpha1.DestinationSpec{Logs: "http://loki:3100/otlp"})
 		Expect(err).NotTo(HaveOccurred())
 		p := pipelinesOf(cfg)
-		Expect(p["logs/events"]).To(HaveKeyWithValue("receivers", ConsistOf("k8sobjects")))
+		Expect(p["logs/events"]).To(HaveKeyWithValue("receivers", ConsistOf(k8sObjectsReceiver)))
 		Expect(p["logs/events"]).To(HaveKeyWithValue("exporters", ConsistOf("otlp_http/logs")))
 		Expect(p["logs"]).To(HaveKeyWithValue("receivers", ConsistOf("otlp")))
 		Expect(p["logs"]).To(HaveKeyWithValue("processors", Not(ContainElement("resource/events"))))
@@ -83,7 +83,7 @@ var _ = Describe("Collector config rendering", func() {
 		cfg, err := renderGatewayConfig(sampleCM(monitoringv1alpha1.CollectSpec{Events: new(false)}), "prod",
 			monitoringv1alpha1.DestinationSpec{Logs: "http://loki:3100/otlp"})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg).NotTo(ContainSubstring("k8sobjects"))
+		Expect(cfg).NotTo(ContainSubstring(k8sObjectsReceiver))
 		Expect(cfg).NotTo(ContainSubstring("resource/events"))
 		Expect(pipelinesOf(cfg)).NotTo(HaveKey("logs/events"))
 		Expect(cfg).To(ContainSubstring("otlp_http/logs"))

@@ -101,6 +101,8 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-agent", Namespace: ns}, ds)).To(Succeed())
 		Expect(ds.Spec.Template.Spec.ServiceAccountName).To(Equal(resourceName + "-collector"))
 		Expect(ds.Spec.Template.Spec.Volumes).To(ContainElement(HaveField("Name", "varlogpods")))
+		// A slow start (throttled CPU) must not be killed by the liveness probe.
+		Expect(ds.Spec.Template.Spec.Containers[0].StartupProbe).NotTo(BeNil())
 		Expect(ds.Spec.Template.Annotations).To(HaveKey(configHashAnnotation))
 		Expect(ds.OwnerReferences).To(HaveLen(1))
 
@@ -112,7 +114,7 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		gwCM := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-gateway", Namespace: ns}, gwCM)).To(Succeed())
 		Expect(gwCM.Data[configFileName]).To(ContainSubstring("http://prometheus:9090/api/v1/otlp"))
-		Expect(gwCM.Data[configFileName]).To(ContainSubstring("k8sobjects"))
+		Expect(gwCM.Data[configFileName]).To(ContainSubstring(k8sObjectsReceiver))
 
 		By("creating cluster-wide RBAC for the collectors")
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "drishti:" + resourceName + ":collector"},

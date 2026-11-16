@@ -87,8 +87,8 @@ func hash(s string) string {
 // API groups.
 const eventsResource = "events"
 
-// collectorRules is what kubeletstats, k8sattributes, k8s_cluster and
-// k8sobjects need. The operator must hold every one of these itself
+// collectorRules is what kubelet_stats, k8s_attributes, k8s_cluster and
+// k8s_objects need. The operator must hold every one of these itself
 // (see the rbac markers in the controller) or the API server refuses to
 // create the ClusterRole.
 func collectorRules(cm *monitoringv1alpha1.ClusterMonitoring) []rbacv1.PolicyRule {
@@ -137,7 +137,7 @@ type size struct{ cpu, memory string }
 var gatewaySize = size{"500m", "1Gi"}
 
 // defaultSizes are per platform. OpenShift clusters usually run more pods per
-// node, so the agent's k8sattributes cache gets a bit more memory.
+// node, so the agent's k8s_attributes cache gets a bit more memory.
 var defaultSizes = map[monitoringv1alpha1.Platform]struct{ perNode, central size }{
 	monitoringv1alpha1.PlatformGKE: {size{"200m", "256Mi"}, gatewaySize},
 	monitoringv1alpha1.PlatformEKS: {size{"200m", "256Mi"}, gatewaySize},
@@ -186,9 +186,15 @@ func fieldEnv(name, path string) corev1.EnvVar {
 }
 
 func collectorContainer(image string, res corev1.ResourceRequirements) corev1.Container {
-	probe := &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+	health := corev1.ProbeHandler{
 		HTTPGet: &corev1.HTTPGetAction{Path: "/", Port: intstr.FromInt32(healthPort)},
-	}}
+	}
+	probe := &corev1.Probe{ProbeHandler: health}
+	// The collector can take well over the liveness window to start when its
+	// CPU limit is throttled on a busy node (seen on kind control planes).
+	// Liveness and readiness only begin once this succeeds, so a slow start
+	// gets up to 2 minutes instead of being killed and restarted in a loop.
+	startup := &corev1.Probe{ProbeHandler: health, PeriodSeconds: 5, FailureThreshold: 24}
 	return corev1.Container{
 		Name:  "otel-collector",
 		Image: image,
@@ -200,6 +206,7 @@ func collectorContainer(image string, res corev1.ResourceRequirements) corev1.Co
 			fieldEnv("K8S_POD_NAMESPACE", "metadata.namespace"),
 		},
 		Resources:      res,
+		StartupProbe:   startup,
 		LivenessProbe:  probe,
 		ReadinessProbe: probe,
 		VolumeMounts:   []corev1.VolumeMount{{Name: "config", MountPath: "/conf", ReadOnly: true}},
@@ -306,7 +313,7 @@ func mutateGatewayDeployment(cm *monitoringv1alpha1.ClusterMonitoring, dep *apps
 		{Name: "otlp-http", ContainerPort: otlpHTTPPort, Protocol: corev1.ProtocolTCP},
 	}
 
-	// Exactly one replica: k8s_cluster and k8sobjects would emit duplicates
+	// Exactly one replica: k8s_cluster and k8s_objects would emit duplicates
 	// if more than one gateway ran them.
 	dep.Spec.Replicas = ptr.To[int32](1)
 	dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: selectorLabels(cm, componentGateway)}

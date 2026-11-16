@@ -10,8 +10,8 @@ const (
 	DefaultNamespace = "drishti-system"
 
 	// DefaultCollectorImage is the OpenTelemetry Collector (contrib) image.
-	// The contrib distribution is required for kubeletstats, k8s_cluster,
-	// k8sobjects, k8sattributes and filelog.
+	// The contrib distribution is required for kubelet_stats, k8s_cluster,
+	// k8s_objects, k8s_attributes and file_log.
 	DefaultCollectorImage = "otel/opentelemetry-collector-contrib:0.165.0"
 
 	// DefaultEnvironment is used when neither the CR nor the flag set one.

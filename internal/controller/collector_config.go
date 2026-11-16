@@ -31,6 +31,14 @@ const (
 	backendExporter = "otlp_http/"
 	// clusterLabels stamps k8s.cluster.name and deployment.environment.
 	clusterLabels = "resource/cluster"
+
+	// Contrib components, under the names used since collector 0.16x (the
+	// old kubeletstats / filelog / k8sobjects / k8sattributes still work but
+	// log a deprecation warning).
+	kubeletStatsReceiver   = "kubelet_stats"
+	fileLogReceiver        = "file_log"
+	k8sObjectsReceiver     = "k8s_objects"
+	k8sAttributesProcessor = "k8s_attributes"
 )
 
 // Config keys used by several components.
@@ -94,7 +102,7 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 	pipelines := m{}
 
 	processors := cfg["processors"].(m)
-	processors["k8sattributes"] = m{
+	processors[k8sAttributesProcessor] = m{
 		keyAuthType:   serviceAccountAuth,
 		"passthrough": false,
 		// Only watch pods on this node: keeps memory flat on large clusters.
@@ -115,7 +123,7 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 	exporters := m{
 		gatewayExporter: m{keyEndpoint: gatewayEndpoint, "tls": m{"insecure": true}},
 	}
-	agentProcessors := []string{memoryLimiter, "k8sattributes", batchProcessor}
+	agentProcessors := []string{memoryLimiter, k8sAttributesProcessor, batchProcessor}
 
 	if c.NodesEnabled() || c.PodsEnabled() {
 		var groups []string
@@ -125,7 +133,7 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 		if c.PodsEnabled() {
 			groups = append(groups, "pod", "container")
 		}
-		receivers["kubeletstats"] = m{
+		receivers[kubeletStatsReceiver] = m{
 			"collection_interval": cm.Spec.Interval().String(),
 			keyAuthType:           serviceAccountAuth,
 			// hostIP works on every platform; kubelet serving certs are often
@@ -134,11 +142,11 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 			"insecure_skip_verify": true,
 			"metric_groups":        groups,
 		}
-		pipelines["metrics"] = pipeline([]string{"kubeletstats"}, agentProcessors, []string{gatewayExporter})
+		pipelines["metrics"] = pipeline([]string{kubeletStatsReceiver}, agentProcessors, []string{gatewayExporter})
 	}
 
 	if c.LogsEnabled() {
-		receivers["filelog"] = m{
+		receivers[fileLogReceiver] = m{
 			"include": []string{"/var/log/pods/*/*/*.log"},
 			// Never collect our own logs: it would feed back on itself.
 			"exclude":           []string{fmt.Sprintf("/var/log/pods/%s_%s-*/*/*.log", namespace, agentName(cm))},
@@ -151,7 +159,7 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 				m{"type": "container", "id": "container-parser"},
 			},
 		}
-		pipelines["logs"] = pipeline([]string{"filelog"}, agentProcessors, []string{gatewayExporter})
+		pipelines["logs"] = pipeline([]string{fileLogReceiver}, agentProcessors, []string{gatewayExporter})
 	}
 
 	cfg["receivers"] = receivers
@@ -192,7 +200,7 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 	}
 	processors := cfg["processors"].(m)
 	if c.EventsEnabled() {
-		receivers["k8sobjects"] = m{
+		receivers[k8sObjectsReceiver] = m{
 			keyAuthType: serviceAccountAuth,
 			"objects": []any{
 				m{
@@ -261,7 +269,7 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 	// Events get their own pipeline so the events-only processors never touch
 	// container or app logs arriving over OTLP.
 	if c.EventsEnabled() {
-		pipelines["logs/events"] = pipeline([]string{"k8sobjects"},
+		pipelines["logs/events"] = pipeline([]string{k8sObjectsReceiver},
 			[]string{memoryLimiter, clusterLabels, "resource/events", "transform/events", batchProcessor},
 			[]string{logsExporter})
 	}
