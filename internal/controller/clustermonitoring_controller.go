@@ -40,11 +40,15 @@ type ClusterMonitoringReconciler struct {
 
 // summary is what one reconcile produced; it drives the Ready condition.
 type summary struct {
-	agentEnabled bool
-	agentReady   int32
-	agentDesired int32
-	agentSettled bool
-	gatewayReady bool
+	agentEnabled          bool
+	agentReady            int32
+	agentDesired          int32
+	agentSettled          bool
+	gatewayReady          bool
+	gatewayReadyReplicas  int32
+	gatewayReplicas       int32
+	clusterCollectorOn    bool
+	clusterCollectorReady bool
 }
 
 // The operator's own permissions. It must hold every permission it grants to
@@ -145,7 +149,8 @@ func (r *ClusterMonitoringReconciler) reconcileComponents(ctx context.Context,
 		return sum, err
 	}
 
-	// 1. Identity + RBAC shared by both collectors.
+	// 1. Identity + RBAC for the collectors that call the Kubernetes API
+	// (agent and cluster collector; the gateway runs without a token).
 	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: serviceAccountName(cm), Namespace: ns}}
 	if err := r.apply(ctx, cm, sa, func() { sa.Labels = commonLabels(cm) }); err != nil {
 		return sum, err
@@ -173,7 +178,7 @@ func (r *ClusterMonitoringReconciler) reconcileComponents(ctx context.Context,
 		return sum, err
 	}
 
-	// 2. Gateway: the single path to the backend.
+	// 2. Gateway: the only path to the backends, scaled out.
 	gatewayCfg, err := renderGatewayConfig(cm, env, opts.destination(cm))
 	if err != nil {
 		return sum, err
@@ -186,6 +191,10 @@ func (r *ClusterMonitoringReconciler) reconcileComponents(ctx context.Context,
 	if err := r.apply(ctx, cm, gwSvc, func() { mutateGatewayService(cm, gwSvc) }); err != nil {
 		return sum, err
 	}
+	gwHeadless := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: gatewayHeadlessName(cm), Namespace: ns}}
+	if err := r.apply(ctx, cm, gwHeadless, func() { mutateGatewayHeadlessService(cm, gwHeadless) }); err != nil {
+		return sum, err
+	}
 	gwDep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: gatewayName(cm), Namespace: ns}}
 	if err := r.apply(ctx, cm, gwDep, func() {
 		mutateGatewayDeployment(cm, gwDep, opts.CollectorImage, gatewayCfg)
@@ -193,8 +202,39 @@ func (r *ClusterMonitoringReconciler) reconcileComponents(ctx context.Context,
 		return sum, err
 	}
 	sum.gatewayReady = deploymentReady(gwDep)
+	sum.gatewayReadyReplicas = gwDep.Status.AvailableReplicas
+	sum.gatewayReplicas = cm.Spec.GatewayReplicas()
 
-	// 3. Agent: one per node, only if something node-local is collected.
+	// 3. Cluster collector: exactly one, reads cluster state and events.
+	ccCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: clusterCollectorName(cm), Namespace: ns}}
+	ccDep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: clusterCollectorName(cm), Namespace: ns}}
+	sum.clusterCollectorOn = clusterCollectorEnabled(cm)
+	if sum.clusterCollectorOn {
+		ccCfg, err := renderClusterCollectorConfig(cm, gatewayEndpoint(cm, ns))
+		if err != nil {
+			return sum, err
+		}
+		if err := r.apply(ctx, cm, ccCM, func() {
+			mutateConfigMap(cm, ccCM, componentClusterCollector, ccCfg)
+		}); err != nil {
+			return sum, err
+		}
+		if err := r.apply(ctx, cm, ccDep, func() {
+			mutateClusterCollectorDeployment(cm, ccDep, opts.CollectorImage, ccCfg)
+		}); err != nil {
+			return sum, err
+		}
+		sum.clusterCollectorReady = deploymentReady(ccDep)
+	} else {
+		if err := r.deleteIfExists(ctx, ccDep); err != nil {
+			return sum, err
+		}
+		if err := r.deleteIfExists(ctx, ccCM); err != nil {
+			return sum, err
+		}
+	}
+
+	// 4. Agent: one per node, only if something node-local is collected.
 	agentCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: agentName(cm), Namespace: ns}}
 	agentDS := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: agentName(cm), Namespace: ns}}
 	sum.agentEnabled = agentEnabled(cm)
@@ -315,18 +355,25 @@ func plural(n int, word string) string {
 	return fmt.Sprintf("%d %ss", n, word)
 }
 
-// readyCondition renders the summary, e.g. "2 collectors created".
+// readyCondition renders the summary, e.g. "3 collectors created".
 func (s summary) readyCondition() (metav1.ConditionStatus, string, string) {
 	collectors := 1
 	if s.agentEnabled {
 		collectors++
 	}
+	if s.clusterCollectorOn {
+		collectors++
+	}
 	msg := plural(collectors, "collector") + " created"
 
-	if !s.gatewayReady || (s.agentEnabled && !s.agentSettled) {
-		progress := "gateway not ready"
-		if s.gatewayReady {
-			progress = "gateway ready"
+	if !s.gatewayReady || (s.agentEnabled && !s.agentSettled) || (s.clusterCollectorOn && !s.clusterCollectorReady) {
+		progress := fmt.Sprintf("gateway %d/%d ready", s.gatewayReadyReplicas, s.gatewayReplicas)
+		if s.clusterCollectorOn {
+			if s.clusterCollectorReady {
+				progress += ", cluster collector ready"
+			} else {
+				progress += ", cluster collector not ready"
+			}
 		}
 		if s.agentEnabled {
 			progress += fmt.Sprintf(", agent %d/%d nodes ready", s.agentReady, s.agentDesired)

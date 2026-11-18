@@ -22,8 +22,9 @@ const (
 	ManagedByLabel = "app.kubernetes.io/managed-by"
 	ManagedByValue = "drishti"
 
-	componentAgent   = "agent"
-	componentGateway = "gateway"
+	componentAgent            = "agent"
+	componentGateway          = "gateway"
+	componentClusterCollector = "cluster-collector"
 
 	configHashAnnotation = "drishti.io/config-hash"
 
@@ -36,6 +37,15 @@ const (
 
 func agentName(cm *monitoringv1alpha1.ClusterMonitoring) string   { return cm.Name + "-agent" }
 func gatewayName(cm *monitoringv1alpha1.ClusterMonitoring) string { return cm.Name + "-gateway" }
+func clusterCollectorName(cm *monitoringv1alpha1.ClusterMonitoring) string {
+	return cm.Name + "-" + componentClusterCollector
+}
+
+// gatewayHeadlessName is a headless Service (no cluster IP): its DNS name
+// returns every ready gateway pod, so collectors can spread load over them.
+func gatewayHeadlessName(cm *monitoringv1alpha1.ClusterMonitoring) string {
+	return gatewayName(cm) + "-headless"
+}
 func serviceAccountName(cm *monitoringv1alpha1.ClusterMonitoring) string {
 	return cm.Name + "-collector"
 }
@@ -46,9 +56,11 @@ func sccBindingName(cm *monitoringv1alpha1.ClusterMonitoring) string {
 	return "drishti:" + cm.Name + ":scc-privileged"
 }
 
-// gatewayEndpoint is the in-cluster OTLP/gRPC address agents export to.
+// gatewayEndpoint is the OTLP/gRPC address the agents and the cluster
+// collector export to. dns:/// makes the gRPC client resolve every gateway pod
+// behind the headless Service instead of a single virtual IP.
 func gatewayEndpoint(cm *monitoringv1alpha1.ClusterMonitoring, namespace string) string {
-	return fmt.Sprintf("%s.%s.svc:%d", gatewayName(cm), namespace, otlpGRPCPort)
+	return fmt.Sprintf("dns:///%s.%s.svc:%d", gatewayHeadlessName(cm), namespace, otlpGRPCPort)
 }
 
 // ---- labels ----------------------------------------------------------------
@@ -132,16 +144,21 @@ func mutateClusterRoleBinding(cm *monitoringv1alpha1.ClusterMonitoring, crb *rba
 
 type size struct{ cpu, memory string }
 
-// gatewaySize is the same on every platform: its load depends on the number
-// of nodes and apps, not on the platform.
-var gatewaySize = size{"500m", "1Gi"}
+// gatewaySize is per replica; add replicas rather than size for more load.
+// clusterCollectorSize holds a copy of every watched object in memory, so on
+// large clusters raise its memory first. Both start at the same size on every
+// platform: their load depends on cluster size, not on the platform.
+var (
+	gatewaySize          = size{"250m", "512Mi"}
+	clusterCollectorSize = gatewaySize
+)
 
 // defaultSizes are per platform. OpenShift clusters usually run more pods per
 // node, so the agent's k8s_attributes cache gets a bit more memory.
-var defaultSizes = map[monitoringv1alpha1.Platform]struct{ perNode, central size }{
-	monitoringv1alpha1.PlatformGKE: {size{"200m", "256Mi"}, gatewaySize},
-	monitoringv1alpha1.PlatformEKS: {size{"200m", "256Mi"}, gatewaySize},
-	monitoringv1alpha1.PlatformOCP: {size{"250m", "384Mi"}, gatewaySize},
+var defaultSizes = map[monitoringv1alpha1.Platform]struct{ perNode size }{
+	monitoringv1alpha1.PlatformGKE: {size{"200m", "256Mi"}},
+	monitoringv1alpha1.PlatformEKS: {size{"200m", "256Mi"}},
+	monitoringv1alpha1.PlatformOCP: {size{"250m", "384Mi"}},
 }
 
 // resources returns requests == limits (Guaranteed QoS), so memory_limiter
@@ -174,7 +191,15 @@ func gatewayResources(cm *monitoringv1alpha1.ClusterMonitoring) corev1.ResourceR
 	if cm.Spec.CollectorResources != nil {
 		o = cm.Spec.CollectorResources.Central
 	}
-	return resources(defaultSizes[cm.Spec.Platform].central, o)
+	return resources(gatewaySize, o)
+}
+
+func clusterCollectorResources(cm *monitoringv1alpha1.ClusterMonitoring) corev1.ResourceRequirements {
+	var o *monitoringv1alpha1.ResourceSize
+	if cm.Spec.CollectorResources != nil {
+		o = cm.Spec.CollectorResources.ClusterCollector
+	}
+	return resources(clusterCollectorSize, o)
 }
 
 // ---- pod template pieces ----------------------------------------------------
@@ -300,7 +325,37 @@ func mutateAgentDaemonSet(cm *monitoringv1alpha1.ClusterMonitoring, ds *appsv1.D
 	}
 }
 
-// ---- gateway Deployment + Service ---------------------------------------------
+// ---- cluster collector Deployment ---------------------------------------------
+
+func mutateClusterCollectorDeployment(cm *monitoringv1alpha1.ClusterMonitoring, dep *appsv1.Deployment,
+	image, config string) {
+	labels := componentLabels(cm, componentClusterCollector)
+	dep.Labels = labels
+
+	container := collectorContainer(image, clusterCollectorResources(cm))
+	container.SecurityContext = restrictedContainerSecurity()
+
+	// Exactly one replica: k8s_cluster and k8s_objects would emit every
+	// metric and event twice if two copies ran. Recreate (instead of a
+	// rolling update) keeps that true during config changes as well.
+	dep.Spec.Replicas = ptr.To[int32](1)
+	dep.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+	dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: selectorLabels(cm, componentClusterCollector)}
+	dep.Spec.Template = corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      labels,
+			Annotations: map[string]string{configHashAnnotation: hash(config)},
+		},
+		Spec: corev1.PodSpec{
+			ServiceAccountName: serviceAccountName(cm),
+			SecurityContext:    podSecurity(cm),
+			Containers:         []corev1.Container{container},
+			Volumes:            []corev1.Volume{configVolume(clusterCollectorName(cm))},
+		},
+	}
+}
+
+// ---- gateway Deployment + Services --------------------------------------------
 
 func mutateGatewayDeployment(cm *monitoringv1alpha1.ClusterMonitoring, dep *appsv1.Deployment, image, config string) {
 	labels := componentLabels(cm, componentGateway)
@@ -313,9 +368,16 @@ func mutateGatewayDeployment(cm *monitoringv1alpha1.ClusterMonitoring, dep *apps
 		{Name: "otlp-http", ContainerPort: otlpHTTPPort, Protocol: corev1.ProtocolTCP},
 	}
 
-	// Exactly one replica: k8s_cluster and k8s_objects would emit duplicates
-	// if more than one gateway ran them.
-	dep.Spec.Replicas = ptr.To[int32](1)
+	// Stateless, so it scales out. A new pod must be ready before an old one
+	// stops, so a config change never leaves the cluster without a gateway.
+	dep.Spec.Replicas = new(cm.Spec.GatewayReplicas())
+	dep.Spec.Strategy = appsv1.DeploymentStrategy{
+		Type: appsv1.RollingUpdateDeploymentStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDeployment{
+			MaxUnavailable: new(intstr.FromInt32(0)),
+			MaxSurge:       new(intstr.FromInt32(1)),
+		},
+	}
 	dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: selectorLabels(cm, componentGateway)}
 	dep.Spec.Template = corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -323,19 +385,42 @@ func mutateGatewayDeployment(cm *monitoringv1alpha1.ClusterMonitoring, dep *apps
 			Annotations: map[string]string{configHashAnnotation: hash(config)},
 		},
 		Spec: corev1.PodSpec{
-			ServiceAccountName: serviceAccountName(cm),
-			SecurityContext:    podSecurity(cm),
-			Containers:         []corev1.Container{container},
-			Volumes:            []corev1.Volume{configVolume(gatewayName(cm))},
+			// The gateway never calls the Kubernetes API: no token, no RBAC.
+			AutomountServiceAccountToken: new(false),
+			SecurityContext:              podSecurity(cm),
+			Containers:                   []corev1.Container{container},
+			Volumes:                      []corev1.Volume{configVolume(gatewayName(cm))},
+			// Spread replicas over nodes, so losing one node keeps the others.
+			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+				MaxSkew:           1,
+				TopologyKey:       corev1.LabelHostname,
+				WhenUnsatisfiable: corev1.ScheduleAnyway,
+				LabelSelector:     &metav1.LabelSelector{MatchLabels: selectorLabels(cm, componentGateway)},
+			}},
 		},
 	}
 }
 
-func mutateGatewayService(cm *monitoringv1alpha1.ClusterMonitoring, svc *corev1.Service) {
-	svc.Labels = componentLabels(cm, componentGateway)
-	svc.Spec.Selector = selectorLabels(cm, componentGateway)
-	svc.Spec.Ports = []corev1.ServicePort{
+func gatewayPorts() []corev1.ServicePort {
+	return []corev1.ServicePort{
 		{Name: "otlp-grpc", Port: otlpGRPCPort, TargetPort: intstr.FromString("otlp-grpc"), Protocol: corev1.ProtocolTCP},
 		{Name: "otlp-http", Port: otlpHTTPPort, TargetPort: intstr.FromString("otlp-http"), Protocol: corev1.ProtocolTCP},
 	}
+}
+
+// mutateGatewayService is the regular Service: one stable address for apps
+// that send OTLP to the gateway.
+func mutateGatewayService(cm *monitoringv1alpha1.ClusterMonitoring, svc *corev1.Service) {
+	svc.Labels = componentLabels(cm, componentGateway)
+	svc.Spec.Selector = selectorLabels(cm, componentGateway)
+	svc.Spec.Ports = gatewayPorts()
+}
+
+// mutateGatewayHeadlessService is used by our own collectors for client-side
+// load balancing over all gateway replicas (see toGateway).
+func mutateGatewayHeadlessService(cm *monitoringv1alpha1.ClusterMonitoring, svc *corev1.Service) {
+	svc.Labels = componentLabels(cm, componentGateway)
+	svc.Spec.ClusterIP = corev1.ClusterIPNone
+	svc.Spec.Selector = selectorLabels(cm, componentGateway)
+	svc.Spec.Ports = gatewayPorts()
 }

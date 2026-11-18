@@ -108,8 +108,28 @@ spec:
                   Default: sized by the operator per platform.
                 properties:
                   central:
-                    description: central sizes the Deployment collector (cluster metrics,
-                      events, gateway).
+                    description: |-
+                      central sizes each gateway replica (receives everything, exports to the
+                      backends).
+                    properties:
+                      cpu:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      memory:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  clusterCollector:
+                    description: |-
+                      clusterCollector sizes the single cluster collector pod (cluster state
+                      metrics and events from the API server). Its memory grows with the
+                      number of objects in the cluster.
                     properties:
                       cpu:
                         anyOf:
@@ -125,8 +145,7 @@ spec:
                         x-kubernetes-int-or-string: true
                     type: object
                   perNode:
-                    description: perNode sizes the DaemonSet collector (one pod per
-                      node).
+                    description: perNode sizes the agent DaemonSet (one pod per node).
                     properties:
                       cpu:
                         anyOf:
@@ -166,6 +185,20 @@ spec:
                   label. Defaults to the operator's --default-environment flag.
                 maxLength: 63
                 type: string
+              gateway:
+                default: {}
+                description: gateway configures the collector that sends all data
+                  to the backends.
+                properties:
+                  replicas:
+                    default: 2
+                    description: 'replicas is the number of gateway pods. Default:
+                      2.'
+                    format: int32
+                    maximum: 20
+                    minimum: 1
+                    type: integer
+                type: object
               platform:
                 description: |-
                   platform is the Kubernetes distribution. Each platform needs slightly

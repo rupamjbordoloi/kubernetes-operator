@@ -65,10 +65,26 @@ type ClusterMonitoringSpec struct {
 	// +optional
 	Destination *DestinationSpec `json:"destination,omitempty"`
 
+	// gateway configures the collector that sends all data to the backends.
+	// +optional
+	// +kubebuilder:default={}
+	Gateway GatewaySpec `json:"gateway,omitzero"`
+
 	// collectorResources overrides CPU / memory of the collector pods.
 	// Default: sized by the operator per platform.
 	// +optional
 	CollectorResources *CollectorResourcesSpec `json:"collectorResources,omitempty"`
+}
+
+// GatewaySpec configures the gateway Deployment. It holds no cluster state,
+// so it can run several replicas to share the export load.
+type GatewaySpec struct {
+	// replicas is the number of gateway pods. Default: 2.
+	// +optional
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=20
+	Replicas *int32 `json:"replicas,omitempty"`
 }
 
 // CollectSpec toggles each signal. Pointers are used so an explicit `false`
@@ -113,15 +129,22 @@ type DestinationSpec struct {
 	Logs string `json:"logs,omitempty"`
 }
 
-// CollectorResourcesSpec sizes the two collector workloads.
+// CollectorResourcesSpec sizes the three collector workloads.
 type CollectorResourcesSpec struct {
-	// perNode sizes the DaemonSet collector (one pod per node).
+	// perNode sizes the agent DaemonSet (one pod per node).
 	// +optional
 	PerNode *ResourceSize `json:"perNode,omitempty"`
 
-	// central sizes the Deployment collector (cluster metrics, events, gateway).
+	// central sizes each gateway replica (receives everything, exports to the
+	// backends).
 	// +optional
 	Central *ResourceSize `json:"central,omitempty"`
+
+	// clusterCollector sizes the single cluster collector pod (cluster state
+	// metrics and events from the API server). Its memory grows with the
+	// number of objects in the cluster.
+	// +optional
+	ClusterCollector *ResourceSize `json:"clusterCollector,omitempty"`
 }
 
 // ResourceSize is a CPU / memory pair used as both request and limit.
@@ -203,6 +226,14 @@ func (c CollectSpec) NodesEnabled() bool  { return boolOr(c.Nodes, true) }
 func (c CollectSpec) PodsEnabled() bool   { return boolOr(c.Pods, true) }
 func (c CollectSpec) EventsEnabled() bool { return boolOr(c.Events, true) }
 func (c CollectSpec) LogsEnabled() bool   { return boolOr(c.Logs, false) }
+
+// GatewayReplicas returns gateway.replicas, defaulting to 2.
+func (s ClusterMonitoringSpec) GatewayReplicas() int32 {
+	if s.Gateway.Replicas == nil || *s.Gateway.Replicas < 1 {
+		return 2
+	}
+	return *s.Gateway.Replicas
+}
 
 // Interval returns collectionInterval, defaulting to 30s.
 func (s ClusterMonitoringSpec) Interval() time.Duration {

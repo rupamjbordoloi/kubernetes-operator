@@ -72,8 +72,10 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		for _, obj := range []client.Object{
 			&appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-agent", Namespace: ns}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-gateway", Namespace: ns}},
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-cluster-collector", Namespace: ns}},
 			&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-agent", Namespace: ns}},
 			&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-gateway", Namespace: ns}},
+			&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-cluster-collector", Namespace: ns}},
 		} {
 			_ = client.IgnoreNotFound(k8sClient.Delete(ctx, obj))
 		}
@@ -90,6 +92,7 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		Expect(cm.Spec.Collect.Nodes).To(Equal(new(true)))
 		Expect(cm.Spec.Collect.Logs).To(Equal(new(false)))
 		Expect(cm.Spec.CollectionInterval.Duration).To(Equal(30 * time.Second))
+		Expect(cm.Spec.Gateway.Replicas).To(Equal(new(int32(2))))
 	})
 
 	It("creates collectors and RBAC, and reports progress", func() {
@@ -106,15 +109,36 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		Expect(ds.Spec.Template.Annotations).To(HaveKey(configHashAnnotation))
 		Expect(ds.OwnerReferences).To(HaveLen(1))
 
-		By("creating the gateway with the backend endpoint in its config")
+		By("creating a scaled-out gateway with the backend endpoint and no API access")
+		gwDep := &appsv1.Deployment{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-gateway", Namespace: ns},
-			&appsv1.Deployment{})).To(Succeed())
+			gwDep)).To(Succeed())
+		Expect(gwDep.Spec.Replicas).To(Equal(new(int32(2))))
+		Expect(gwDep.Spec.Template.Spec.AutomountServiceAccountToken).To(Equal(new(false)))
+		Expect(gwDep.Spec.Strategy.RollingUpdate.MaxUnavailable.IntValue()).To(Equal(0))
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-gateway", Namespace: ns},
 			&corev1.Service{})).To(Succeed())
+		headless := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-gateway-headless", Namespace: ns},
+			headless)).To(Succeed())
+		Expect(headless.Spec.ClusterIP).To(Equal(corev1.ClusterIPNone))
 		gwCM := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-gateway", Namespace: ns}, gwCM)).To(Succeed())
 		Expect(gwCM.Data[configFileName]).To(ContainSubstring("http://prometheus:9090/api/v1/otlp"))
-		Expect(gwCM.Data[configFileName]).To(ContainSubstring(k8sObjectsReceiver))
+		Expect(gwCM.Data[configFileName]).NotTo(ContainSubstring(k8sObjectsReceiver))
+
+		By("creating exactly one cluster collector that reads the API and sends to the gateway")
+		ccDep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-cluster-collector", Namespace: ns},
+			ccDep)).To(Succeed())
+		Expect(ccDep.Spec.Replicas).To(Equal(new(int32(1))))
+		Expect(ccDep.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
+		Expect(ccDep.Spec.Template.Spec.ServiceAccountName).To(Equal(resourceName + "-collector"))
+		ccCM := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-cluster-collector", Namespace: ns},
+			ccCM)).To(Succeed())
+		Expect(ccCM.Data[configFileName]).To(ContainSubstring(k8sObjectsReceiver))
+		Expect(ccCM.Data[configFileName]).To(ContainSubstring("dns:///" + resourceName + "-gateway-headless."))
 
 		By("creating cluster-wide RBAC for the collectors")
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "drishti:" + resourceName + ":collector"},
@@ -129,7 +153,7 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
 		Expect(cond.Reason).To(Equal(monitoringv1alpha1.ReasonProgressing))
-		Expect(cond.Message).To(ContainSubstring("2 collectors created"))
+		Expect(cond.Message).To(ContainSubstring("3 collectors created"))
 	})
 
 	It("requeues on an update conflict instead of reporting an error", func() {
@@ -190,6 +214,27 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 
 		err := k8sClient.Get(ctx, agentKey, &appsv1.DaemonSet{})
 		Expect(errors.IsNotFound(err)).To(BeTrue())
+	})
+
+	It("removes the cluster collector when nothing cluster-wide is collected", func() {
+		createCR(resourceName, monitoringv1alpha1.CollectSpec{})
+		reconcileOnce(resourceName)
+		ccKey := types.NamespacedName{Name: resourceName + "-cluster-collector", Namespace: ns}
+		Expect(k8sClient.Get(ctx, ccKey, &appsv1.Deployment{})).To(Succeed())
+
+		cm := &monitoringv1alpha1.ClusterMonitoring{}
+		Expect(k8sClient.Get(ctx, key, cm)).To(Succeed())
+		cm.Spec.Collect = monitoringv1alpha1.CollectSpec{
+			Nodes: new(false), Pods: new(false), Logs: new(true), Events: new(false),
+		}
+		Expect(k8sClient.Update(ctx, cm)).To(Succeed())
+		reconcileOnce(resourceName)
+
+		Expect(errors.IsNotFound(k8sClient.Get(ctx, ccKey, &appsv1.Deployment{}))).To(BeTrue())
+		Expect(errors.IsNotFound(k8sClient.Get(ctx, ccKey, &corev1.ConfigMap{}))).To(BeTrue())
+		// The gateway always stays: it is the only way out to the backends.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-gateway", Namespace: ns},
+			&appsv1.Deployment{})).To(Succeed())
 	})
 
 	It("marks a second ClusterMonitoring as duplicate", func() {

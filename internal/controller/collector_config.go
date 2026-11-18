@@ -36,6 +36,7 @@ const (
 	// old kubeletstats / filelog / k8sobjects / k8sattributes still work but
 	// log a deprecation warning).
 	kubeletStatsReceiver   = "kubelet_stats"
+	k8sClusterReceiver     = "k8s_cluster"
 	fileLogReceiver        = "file_log"
 	k8sObjectsReceiver     = "k8s_objects"
 	k8sAttributesProcessor = "k8s_attributes"
@@ -59,6 +60,25 @@ func agentEnabled(cm *monitoringv1alpha1.ClusterMonitoring) bool {
 	return c.NodesEnabled() || c.PodsEnabled() || c.LogsEnabled()
 }
 
+// clusterCollectorEnabled reports whether the cluster collector is needed:
+// it reads cluster state (with nodes or pods) and events from the API server.
+func clusterCollectorEnabled(cm *monitoringv1alpha1.ClusterMonitoring) bool {
+	c := cm.Spec.Collect
+	return c.NodesEnabled() || c.PodsEnabled() || c.EventsEnabled()
+}
+
+// toGateway is the exporter both the agents and the cluster collector use.
+// The endpoint is a headless Service resolved with dns:///, and round_robin
+// spreads requests over every gateway replica. A ClusterIP Service would pin
+// each long-lived gRPC connection to a single replica.
+func toGateway(endpoint string) m {
+	return m{gatewayExporter: m{
+		keyEndpoint:     endpoint,
+		"balancer_name": "round_robin",
+		"tls":           m{"insecure": true},
+	}}
+}
+
 func pipeline(receivers, processors, exporters []string) m {
 	return m{"receivers": receivers, "processors": processors, "exporters": exporters}
 }
@@ -74,7 +94,7 @@ func attribute(key, value, action string) m {
 	return m{"key": key, "value": value, "action": action}
 }
 
-// baseConfig holds the pieces shared by both collectors.
+// baseConfig holds the pieces shared by all three collectors.
 func baseConfig() m {
 	return m{
 		"extensions": m{
@@ -120,9 +140,7 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 		},
 	}
 
-	exporters := m{
-		gatewayExporter: m{keyEndpoint: gatewayEndpoint, "tls": m{"insecure": true}},
-	}
+	exporters := toGateway(gatewayEndpoint)
 	agentProcessors := []string{memoryLimiter, k8sAttributesProcessor, batchProcessor}
 
 	if c.NodesEnabled() || c.PodsEnabled() {
@@ -168,22 +186,16 @@ func renderAgentConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint
 	return marshal(cfg)
 }
 
-// renderGatewayConfig builds the Deployment collector config. It is the only
-// component that talks to the backend: it receives OTLP from the agents (and
-// from apps), adds cluster-level metrics and events, stamps the cluster /
-// environment labels, and exports.
-func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment string,
-	dest monitoringv1alpha1.DestinationSpec) (string, error) {
+// renderClusterCollectorConfig builds the config of the single cluster
+// collector. It is the only component that reads cluster-wide state from the
+// API server (k8s_cluster metrics and k8s_objects events), so it must run
+// exactly once per cluster. It forwards everything to the gateway.
+func renderClusterCollectorConfig(cm *monitoringv1alpha1.ClusterMonitoring, gatewayEndpoint string) (string, error) {
 	c := cm.Spec.Collect
 	cfg := baseConfig()
-
-	receivers := m{
-		otlpReceiver: m{"protocols": m{
-			"grpc": m{keyEndpoint: fmt.Sprintf("0.0.0.0:%d", otlpGRPCPort)},
-			"http": m{keyEndpoint: fmt.Sprintf("0.0.0.0:%d", otlpHTTPPort)},
-		}},
-	}
-	metricsReceivers := []string{otlpReceiver}
+	receivers := m{}
+	pipelines := m{}
+	processors := cfg["processors"].(m)
 
 	if c.NodesEnabled() || c.PodsEnabled() {
 		k8sCluster := m{
@@ -195,10 +207,10 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 			// Adds ClusterResourceQuota metrics.
 			k8sCluster["distribution"] = "openshift"
 		}
-		receivers["k8s_cluster"] = k8sCluster
-		metricsReceivers = append(metricsReceivers, "k8s_cluster")
+		receivers[k8sClusterReceiver] = k8sCluster
+		pipelines["metrics"] = pipeline([]string{k8sClusterReceiver},
+			[]string{memoryLimiter, batchProcessor}, []string{gatewayExporter})
 	}
-	processors := cfg["processors"].(m)
 	if c.EventsEnabled() {
 		receivers[k8sObjectsReceiver] = m{
 			keyAuthType: serviceAccountAuth,
@@ -224,6 +236,31 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 				"statements": []string{`delete_key(body["object"]["metadata"], "managedFields")`},
 			}},
 		}
+		pipelines["logs/events"] = pipeline([]string{k8sObjectsReceiver},
+			[]string{memoryLimiter, "resource/events", "transform/events", batchProcessor},
+			[]string{gatewayExporter})
+	}
+
+	cfg["receivers"] = receivers
+	cfg["exporters"] = toGateway(gatewayEndpoint)
+	cfg["service"] = service(pipelines)
+	return marshal(cfg)
+}
+
+// renderGatewayConfig builds the gateway config. It is the only component
+// that talks to the backends: it receives OTLP from the agents, the cluster
+// collector and apps, stamps the cluster / environment labels, and exports.
+// It holds no cluster state, so any number of replicas can run it.
+func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment string,
+	dest monitoringv1alpha1.DestinationSpec) (string, error) {
+	cfg := baseConfig()
+	processors := cfg["processors"].(m)
+
+	receivers := m{
+		otlpReceiver: m{"protocols": m{
+			"grpc": m{keyEndpoint: fmt.Sprintf("0.0.0.0:%d", otlpGRPCPort)},
+			"http": m{keyEndpoint: fmt.Sprintf("0.0.0.0:%d", otlpHTTPPort)},
+		}},
 	}
 
 	processors[clusterLabels] = m{"attributes": []any{
@@ -258,20 +295,13 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 	}
 
 	common := []string{memoryLimiter, clusterLabels, batchProcessor}
-	logsExporter := exporterFor("logs", dest.Logs)
+	otlpIn := []string{otlpReceiver}
 	pipelines := m{
-		"metrics": pipeline(metricsReceivers,
+		"metrics": pipeline(otlpIn,
 			[]string{memoryLimiter, clusterLabels, "transform/labels", batchProcessor},
 			[]string{exporterFor("metrics", dest.Metrics)}),
-		"logs":   pipeline([]string{otlpReceiver}, common, []string{logsExporter}),
-		"traces": pipeline([]string{otlpReceiver}, common, []string{exporterFor("traces", dest.Traces)}),
-	}
-	// Events get their own pipeline so the events-only processors never touch
-	// container or app logs arriving over OTLP.
-	if c.EventsEnabled() {
-		pipelines["logs/events"] = pipeline([]string{k8sObjectsReceiver},
-			[]string{memoryLimiter, clusterLabels, "resource/events", "transform/events", batchProcessor},
-			[]string{logsExporter})
+		"logs":   pipeline(otlpIn, common, []string{exporterFor("logs", dest.Logs)}),
+		"traces": pipeline(otlpIn, common, []string{exporterFor("traces", dest.Traces)}),
 	}
 
 	cfg["receivers"] = receivers

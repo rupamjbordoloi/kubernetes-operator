@@ -3,8 +3,9 @@
 # One per cluster. It is cluster-scoped, so there is no namespace.
 #
 # What Drishti creates from this:
-#   - OTel collector as a DaemonSet  (one per node: node + pod metrics, logs)
-#   - OTel collector as a Deployment (cluster-level metrics, events, gateway)
+#   - agent:             DaemonSet, one per node (node + pod metrics, logs)
+#   - cluster collector: Deployment, always 1 (cluster state metrics, events)
+#   - gateway:           Deployment, N replicas (sends everything to the backends)
 #
 # Minimal version (everything else uses defaults):
 #   apiVersion: monitoring.drishti.io/v1alpha1
@@ -56,16 +57,25 @@ spec:
   #   traces:  http://tempo:4318
   #   logs:    http://loki:3100/otlp
 
+  # OPTIONAL. Number of gateway pods. Default: 2.
+  # Why: the gateway sends all data to the backends. More replicas share the
+  # load and keep data flowing if one pod or node goes down.
+  # gateway:
+  #   replicas: 2
+
   # OPTIONAL. CPU / memory for the collector pods.
   # Default: sized by Drishti per platform. Only change if collectors are
   # being throttled or killed for using too much memory.
   # collectorResources:
-  #   perNode:
+  #   perNode:            # each agent
   #     cpu: 200m
   #     memory: 256Mi
-  #   central:
-  #     cpu: 500m
-  #     memory: 1Gi
+  #   central:            # each gateway replica
+  #     cpu: 250m
+  #     memory: 512Mi
+  #   clusterCollector:   # grows with the number of objects in the cluster
+  #     cpu: 250m
+  #     memory: 512Mi
 
 # ---------------------------------------------------------------------
 # status: is written BY DRISHTI, never by the SRE. Example of what
@@ -76,5 +86,5 @@ spec:
 #     - type: Ready
 #       status: "True"
 #       reason: AllComponentsRunning
-#       message: "2 collectors created"
+#       message: "3 collectors created"
 # ---------------------------------------------------------------------

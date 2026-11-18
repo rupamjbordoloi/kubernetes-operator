@@ -65,28 +65,55 @@ var _ = Describe("Collector config rendering", func() {
 		Expect(cfg).To(ContainSubstring("value: prod"))
 	})
 
-	It("sends events through their own pipeline with a service name", func() {
+	It("keeps the gateway free of cluster state, so it can scale out", func() {
 		cfg, err := renderGatewayConfig(sampleCM(monitoringv1alpha1.CollectSpec{}), "prod",
 			monitoringv1alpha1.DestinationSpec{Logs: "http://loki:3100/otlp"})
 		Expect(err).NotTo(HaveOccurred())
 		p := pipelinesOf(cfg)
+		for _, name := range []string{"metrics", "logs", "traces"} {
+			Expect(p[name]).To(HaveKeyWithValue("receivers", ConsistOf(otlpReceiver)))
+		}
+		Expect(p).NotTo(HaveKey("logs/events"))
+		Expect(cfg).NotTo(ContainSubstring(k8sClusterReceiver))
+		Expect(cfg).NotTo(ContainSubstring(k8sObjectsReceiver))
+		Expect(cfg).To(ContainSubstring("otlp_http/logs"))
+	})
+
+	It("sends cluster metrics and events from the cluster collector to the gateway", func() {
+		cfg, err := renderClusterCollectorConfig(sampleCM(monitoringv1alpha1.CollectSpec{}), "dns:///gw:4317")
+		Expect(err).NotTo(HaveOccurred())
+		p := pipelinesOf(cfg)
+		Expect(p["metrics"]).To(HaveKeyWithValue("receivers", ConsistOf(k8sClusterReceiver)))
 		Expect(p["logs/events"]).To(HaveKeyWithValue("receivers", ConsistOf(k8sObjectsReceiver)))
-		Expect(p["logs/events"]).To(HaveKeyWithValue("exporters", ConsistOf("otlp_http/logs")))
-		Expect(p["logs"]).To(HaveKeyWithValue("receivers", ConsistOf("otlp")))
-		Expect(p["logs"]).To(HaveKeyWithValue("processors", Not(ContainElement("resource/events"))))
+		Expect(p["logs/events"]).To(HaveKeyWithValue("processors", ContainElement("resource/events")))
+		for _, name := range []string{"metrics", "logs/events"} {
+			Expect(p[name]).To(HaveKeyWithValue("exporters", ConsistOf(gatewayExporter)))
+		}
+		Expect(cfg).To(ContainSubstring("endpoint: dns:///gw:4317"))
+		Expect(cfg).To(ContainSubstring("balancer_name: round_robin"))
 		Expect(cfg).To(ContainSubstring("value: " + eventsServiceName))
 		Expect(cfg).To(ContainSubstring("- DELETED"))
 		Expect(cfg).To(ContainSubstring("managedFields"))
+		// Only the gateway talks to the backends.
+		Expect(cfg).NotTo(ContainSubstring(backendExporter))
 	})
 
-	It("drops the events receiver when events are off", func() {
-		cfg, err := renderGatewayConfig(sampleCM(monitoringv1alpha1.CollectSpec{Events: new(false)}), "prod",
-			monitoringv1alpha1.DestinationSpec{Logs: "http://loki:3100/otlp"})
+	It("drops the events pipeline from the cluster collector when events are off", func() {
+		cfg, err := renderClusterCollectorConfig(sampleCM(monitoringv1alpha1.CollectSpec{Events: new(false)}),
+			"dns:///gw:4317")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg).NotTo(ContainSubstring(k8sObjectsReceiver))
 		Expect(cfg).NotTo(ContainSubstring("resource/events"))
 		Expect(pipelinesOf(cfg)).NotTo(HaveKey("logs/events"))
-		Expect(cfg).To(ContainSubstring("otlp_http/logs"))
+		Expect(pipelinesOf(cfg)).To(HaveKey("metrics"))
+	})
+
+	It("only needs the cluster collector for cluster state or events", func() {
+		off := new(false)
+		Expect(clusterCollectorEnabled(sampleCM(monitoringv1alpha1.CollectSpec{}))).To(BeTrue())
+		Expect(clusterCollectorEnabled(sampleCM(monitoringv1alpha1.CollectSpec{
+			Nodes: off, Pods: off, Events: off, Logs: new(true),
+		}))).To(BeFalse())
 	})
 
 	It("lets the CR destination override install defaults per signal", func() {

@@ -19,8 +19,9 @@ Drishti then creates:
 | What | Kind | Purpose |
 |---|---|---|
 | `<name>-agent` | DaemonSet (one pod per node) | Node + pod + container metrics from the kubelet; container logs (opt-in) |
-| `<name>-gateway` | Deployment (1 replica) + Service | Cluster-level metrics, Kubernetes events, OTLP gateway for apps; the only component that talks to the backend |
-| `<name>-collector` | ServiceAccount + ClusterRole + ClusterRoleBinding | Read-only API access for the collectors |
+| `<name>-cluster-collector` | Deployment (always 1 replica) | Cluster state metrics and Kubernetes events, read from the API server |
+| `<name>-gateway` | Deployment (`spec.gateway.replicas`, default 2) + Service + headless Service | Receives data from the agents and the cluster collector, and is the only component that talks to the backends |
+| `<name>-collector` | ServiceAccount + ClusterRole + ClusterRoleBinding | Read-only API access for the agent and the cluster collector |
 
 The full annotated example is [yaml/cluster.yml](yaml/cluster.yml).
 
@@ -59,7 +60,7 @@ kubectl apply -f yaml/cluster.yml
 # 6. Wait until READY is True (about a minute: images are pulled first)
 kubectl get cmon -w
 
-# 7. The collectors: 3 agents (one per node) + 1 gateway
+# 7. The collectors: 3 agents (one per node) + 1 cluster collector + 2 gateways
 kubectl -n drishti-system get pods -o wide
 
 # 8. Metrics have reached Prometheus
@@ -269,14 +270,15 @@ kubectl -n drishti-system get ds,deploy,svc,cm,sa -l app.kubernetes.io/managed-b
 kubectl get clusterrole,clusterrolebinding -l app.kubernetes.io/managed-by=drishti
 
 # The rendered OpenTelemetry configs
-kubectl -n drishti-system get cm hlr-gke-prod-agent   -o jsonpath='{.data.config\.yaml}'
-kubectl -n drishti-system get cm hlr-gke-prod-gateway -o jsonpath='{.data.config\.yaml}'
+kubectl -n drishti-system get cm hlr-gke-prod-agent             -o jsonpath='{.data.config\.yaml}'
+kubectl -n drishti-system get cm hlr-gke-prod-cluster-collector -o jsonpath='{.data.config\.yaml}'
+kubectl -n drishti-system get cm hlr-gke-prod-gateway           -o jsonpath='{.data.config\.yaml}'
 ```
 
-With no backend configured, the gateway uses the OTel `debug` exporter, so data shows up in its logs:
+With no backend configured, the gateway uses the OTel `debug` exporter, so data shows up in its logs. With several replicas, `--prefix` shows which pod printed each line:
 
 ```bash
-kubectl -n drishti-system logs deploy/hlr-gke-prod-gateway -f
+kubectl -n drishti-system logs -l app.kubernetes.io/component=gateway --prefix -f
 # ... Metrics {"kind": "exporter", "data_type": "metrics", "name": "debug", "resource metrics": 12, ...}
 # ... Logs    {"kind": "exporter", "data_type": "logs",    "name": "debug", "log records": 7, ...}
 ```
@@ -289,6 +291,12 @@ kubectl patch cmon hlr-gke-prod --type merge -p '{"spec":{"collect":{"logs":true
 
 # Turn off everything node-local: the agent DaemonSet is deleted
 kubectl patch cmon hlr-gke-prod --type merge -p '{"spec":{"collect":{"nodes":false,"pods":false,"logs":false}}}'
+
+# Scale the gateway: more replicas share the export load
+kubectl patch cmon hlr-gke-prod --type merge -p '{"spec":{"gateway":{"replicas":3}}}'
+
+# Turn off cluster state and events: the cluster collector is deleted (the gateway stays)
+kubectl patch cmon hlr-gke-prod --type merge -p '{"spec":{"collect":{"nodes":false,"pods":false,"events":false}}}'
 
 # Deleting a child is self-healing: it is recreated within seconds
 kubectl -n drishti-system delete deploy hlr-gke-prod-gateway
@@ -350,7 +358,7 @@ With `make run`, export the same variables before starting.
 
 - *Prometheus 3.x*: start it with `--web.enable-otlp-receiver`; the base URL is `/api/v1/otlp` and the collector appends `/v1/metrics`. The gateway copies `k8s.cluster.name` and `deployment.environment` onto every datapoint, so they appear as `k8s_cluster_name` / `deployment_environment` labels. Pod, namespace and node names are resource attributes: list them under `otlp.promote_resource_attributes` in `prometheus.yml` to get them as labels.
 - *Loki 3.x*: native OTLP at `/otlp`. Needs `allow_structured_metadata: true` (the default with schema v13).
-- *Tempo*: OTLP/HTTP on port 4318; the collector appends `/v1/traces`. Drishti collects no traces itself: Tempo receives what apps send to the gateway Service.
+- *Tempo*: OTLP/HTTP on port 4318; the collector appends `/v1/traces`. Drishti collects no traces (application monitoring isn't part of cluster monitoring), so this endpoint is optional.
 
 ### 5.1 Local stack: Prometheus, Loki, Tempo and Grafana
 
@@ -387,8 +395,8 @@ Check that data arrives:
 # The gateway config now has otlp_http exporters instead of debug
 kubectl -n drishti-system get cm hlr-gke-prod-gateway -o jsonpath='{.data.config\.yaml}' | grep -A1 otlp_http
 
-# The gateway can reach the backends (no "connection refused" / "no such host")
-kubectl -n drishti-system logs deploy/hlr-gke-prod-gateway | grep -i error
+# The gateways can reach the backends (no "connection refused" / "no such host")
+kubectl -n drishti-system logs -l app.kubernetes.io/component=gateway --prefix | grep -i error
 
 # Metrics in Prometheus
 curl -s 'http://localhost:9090/api/v1/query?query=count(k8s_node_cpu_usage)' ; echo
@@ -398,7 +406,6 @@ Then in Grafana (http://localhost:3000 → **Explore**):
 
 - **Prometheus**: `k8s_node_memory_working_set_bytes`, or `sum by (k8s_pod_name) (k8s_pod_cpu_usage{k8s_namespace_name="drishti-system"})`
 - **Loki**, everything from this cluster: `{k8s_cluster_name="hlr-gke-prod"}`. Only Kubernetes events (`collect.events: true`): `{service_name="kubernetes-events"}`, or warnings only: `{service_name="kubernetes-events"} | json | object_type="Warning"`. Container logs (`collect.logs: true`) are named after their container, e.g. `{service_name="coredns"}`.
-- **Tempo**: search for traces sent by your apps to `hlr-gke-prod-gateway.drishti-system.svc:4318`
 
 Stop the stack with `docker compose -f demo/infrastructure/docker-compose.yaml down`. Nothing is persisted: every service keeps its data in `tmpfs` (memory), so it is discarded whenever a container stops, including when Docker Desktop restarts. The containers come back empty on their own (`restart: unless-stopped`); Grafana re-provisions its datasources on every start.
 
@@ -410,7 +417,7 @@ Stop the stack with `docker compose -f demo/infrastructure/docker-compose.yaml d
 
 Give an SRE one object per cluster that turns on standard logs and metrics collection, with good defaults and no knowledge of backend URLs or OTel internals. Keep platform differences (GKE, EKS, OpenShift) inside the operator.
 
-**Non-goals for v1alpha1:** dashboards and alerts, per-application instrumentation, auto-injecting SDKs, tracing collection from nodes, multi-tenancy inside one cluster.
+**Non-goals for v1alpha1:** dashboards and alerts, application monitoring (instrumenting apps, OTel SDKs, receiving app metrics, logs or traces), tracing collection from nodes, multi-tenancy inside one cluster.
 
 ### 6.2 Architecture
 
@@ -427,18 +434,19 @@ flowchart LR
         KL[kubelet :10250]
         LOGS[/var/log/pods/]
       end
-      GW[gateway pod<br/>Deployment x1]
-      SVC((Service<br/>:4317 / :4318))
+      CC[cluster collector<br/>Deployment x1]
+      HL((headless Service<br/>:4317))
+      GW[gateway pods<br/>Deployment xN]
     end
     API[kube-apiserver]
-    APPS[apps with OTel SDK]
 
-    OP -- creates / updates --> AG & GW & SVC
-    KL -- kubeletstats --> AG
-    LOGS -- filelog (opt-in) --> AG
-    AG -- OTLP gRPC --> SVC --> GW
-    APPS -- OTLP --> SVC
-    API -- k8s_cluster + events --> GW
+    OP -- creates / updates --> AG & CC & GW
+    KL -- kubelet_stats --> AG
+    LOGS -- file_log (opt-in) --> AG
+    API -- k8s_cluster + k8s_objects --> CC
+    AG -- OTLP gRPC, round robin --> HL
+    CC -- OTLP gRPC, round robin --> HL
+    HL --> GW
   end
   GW -- OTLP/HTTP metrics --> PROM[(Prometheus)]
   GW -- OTLP/HTTP logs + events --> LOKI[(Loki)]
@@ -447,59 +455,76 @@ flowchart LR
 
 **How it works, in short**
 
-> The operator creates a **gateway Deployment** and an **agent DaemonSet**, both running the OpenTelemetry Collector **contrib image**, each with a **config the operator generates** (in a ConfigMap), plus RBAC and a Service.
+> The operator creates an **agent DaemonSet**, a **cluster collector Deployment** (1 replica) and a **gateway Deployment** (N replicas). All three run the OpenTelemetry Collector **contrib image**, each with a **config the operator generates** (in a ConfigMap), plus RBAC and Services.
 >
 > - **Agents** **poll** their node's kubelet every 30s for CPU, memory, disk and network (and tail logs if enabled), then send it to the gateway.
-> - The **gateway** uses **list + watch** on the API server to keep a live copy of cluster **objects**. It turns that copy into **state metrics** every 30s, and turns **events** into logs as they arrive.
+> - The **cluster collector** uses **list + watch** on the API server to keep a live copy of cluster **objects**. It turns that copy into **state metrics** every 30s, and turns **events** into logs as they arrive, then sends them to the gateway.
+> - The **gateways** receive everything, add the cluster labels and send it to Prometheus, Loki and Tempo. They hold no cluster state, so there can be as many as the load needs.
 >
-> In both collectors, data goes through **processors** (`memory_limiter` → labels → `batch`, which waits up to 5s or 8192 items), then gets **exported**: agents to the gateway, and the gateway to Prometheus, Loki and Tempo.
+> In every collector, data goes through **processors** (`memory_limiter` → labels → `batch`, which waits up to 5s or 8192 items), then gets **exported**: agents and the cluster collector to the gateways, and the gateways to Prometheus, Loki and Tempo.
 
 ```
-kubelet ──poll 30s──► agent ──batch──OTLP──┐
-                                           ▼
-API server ──list+watch──► gateway ◄───────┘
-                    (objects → metrics every 30s, events → logs at once)
-                              │ memory_limiter → add cluster labels → batch
-                              ▼
-                    Prometheus / Loki / Tempo
+kubelet ────poll 30s─────► agents (1 per node) ─────────┐
+                                                        │ OTLP gRPC, round robin
+API server ──list+watch──► cluster collector (1) ───────┤ over all gateway pods
+              (objects → metrics every 30s,             ▼
+               events → logs at once)          gateway (N replicas)
+                                                        │ memory_limiter → add cluster labels → batch
+                                                        ▼
+                                              Prometheus / Loki / Tempo
 ```
 
-### 6.3 The two collectors
+### 6.3 The three collectors
 
-Both run the **OpenTelemetry Collector contrib** image. They differ only in the config the operator writes.
+All three run the **OpenTelemetry Collector contrib** image. They differ only in the config the operator writes.
 
 **Agent (DaemonSet), node-local work only**
 
 | Receiver | Enabled by | Produces |
 |---|---|---|
-| `kubeletstats` | `collect.nodes` (group `node`), `collect.pods` (groups `pod`, `container`) | CPU, memory, filesystem and network per node, pod and container, read from the local kubelet at `https://$K8S_NODE_IP:10250` using the SA token |
-| `filelog` | `collect.logs` | Every container log line under `/var/log/pods/*/*/*.log`, parsed by the `container` operator (docker / containerd / cri-o). The agent's own logs are excluded to prevent a feedback loop. |
+| `kubelet_stats` | `collect.nodes` (group `node`), `collect.pods` (groups `pod`, `container`) | CPU, memory, filesystem and network per node, pod and container, read from the local kubelet at `https://$K8S_NODE_IP:10250` using the SA token |
+| `file_log` | `collect.logs` | Every container log line under `/var/log/pods/*/*/*.log`, parsed by the `container` operator (docker / containerd / cri-o). The agent's own logs are excluded to prevent a feedback loop. |
 
-Processors: `memory_limiter` → `k8sattributes` (adds deployment / statefulset / daemonset / job names, watching only pods on its own node) → `batch`. Exporter: `otlp_grpc/gateway`, OTLP gRPC to the gateway Service.
+Processors: `memory_limiter` → `k8s_attributes` (adds deployment / statefulset / daemonset / job names, watching only pods on its own node) → `batch`. Exporter: `otlp_grpc/gateway`, OTLP gRPC to the gateway (see "Load balancing" below).
 
-**Gateway (Deployment, exactly 1 replica), cluster-wide work and egress**
+**Cluster collector (Deployment, always exactly 1 replica), cluster-wide state from the API server**
+
+Created when `collect.nodes`, `collect.pods` or `collect.events` is on; deleted when all three are off.
 
 | Receiver | Enabled by | Produces |
 |---|---|---|
-| `otlp` | always | Receives agent data and any app's OTLP traffic (4317 gRPC / 4318 HTTP) |
 | `k8s_cluster` | `collect.nodes` or `collect.pods` | Object state: pod phase, container restarts, node conditions, deployment desired/available, and more. `distribution: openshift` on OCP adds ClusterResourceQuota metrics. |
-| `k8sobjects` | `collect.events` | Kubernetes events (`events.k8s.io`) in watch mode, as log records. `DELETED` watch records are dropped: they are Kubernetes expiring old events (about 1h TTL), not something that happened. |
+| `k8s_objects` | `collect.events` | Kubernetes events (`events.k8s.io`) in watch mode, as log records. `DELETED` watch records are dropped: they are Kubernetes expiring old events (about 1h TTL), not something that happened. |
+
+Processors: `memory_limiter` → `batch`. Events have their own pipeline, `logs/events`, with two extra processors: `resource/events` sets `service.name: kubernetes-events` (without it Loki files them under `unknown_service`), and `transform/events` removes `metadata.managedFields`, which is API server bookkeeping. Exporter: `otlp_grpc/gateway`, same as the agents.
+
+It uses the `Recreate` rollout: on a config change the old pod stops before the new one starts, so there is never a second copy sending the same metrics and events.
+
+**Gateway (Deployment, `spec.gateway.replicas`, default 2), egress only**
+
+| Receiver | Enabled by | Produces |
+|---|---|---|
+| `otlp` | always | Receives data from the agents and the cluster collector (4317 gRPC) |
 
 Processors: `memory_limiter` → `resource/cluster` (upserts `k8s.cluster.name`, `deployment.environment`) → `transform/labels` (metrics only: copies them onto each datapoint) → `batch`. Exporters: one `otlp_http/<signal>` per configured backend, otherwise `debug`.
 
-Events have their own pipeline, `logs/events`, with two extra processors: `resource/events` sets `service.name: kubernetes-events` (without it Loki files them under `unknown_service`), and `transform/events` removes `metadata.managedFields`, which is API server bookkeeping. Container and app logs arrive over OTLP in the `logs` pipeline and are not touched by either. Both pipelines share the same `otlp_http/logs` exporter.
+The gateway never calls the Kubernetes API, so it runs **without a ServiceAccount token** and has no RBAC. Rolling updates start a new pod before stopping an old one (`maxUnavailable: 0`), and replicas are spread across nodes.
 
-**Why a gateway instead of agents exporting directly?**
+**Load balancing**
 
-- Only one component knows backend URLs and credentials, so changing a backend restarts 1 pod instead of N.
-- `k8s_cluster` and `k8sobjects` must run once per cluster, or every node would report the same cluster state. They need a singleton anyway.
-- Cluster labels are stamped in one place.
+The agents and the cluster collector send to `dns:///<name>-gateway-headless.<ns>.svc:4317` with `balancer_name: round_robin`. The headless Service returns the IP of every ready gateway pod, and the gRPC client spreads requests over all of them. A normal Service would not do that: gRPC keeps one long-lived connection, so each agent would stick to a single gateway pod.
 
-**Why one replica?** Two gateways would both run `k8s_cluster` / `k8sobjects` and double every cluster metric and event. Scaling out the OTLP path is a future change: split it into a separate, horizontally scaled Deployment.
+When you add replicas, collectors pick up the new pods the next time they re-resolve the DNS name, which happens when a connection drops or after a few minutes.
+
+**Why this split?**
+
+- `k8s_cluster` and `k8s_objects` must run **once per cluster**. Two copies would double every cluster metric and event, so the cluster collector is a fixed singleton.
+- Exporting is **stateless**, so the gateway can run as many replicas as the load needs, and losing one gateway pod doesn't stop data flowing.
+- Only the gateway knows backend URLs and credentials, and cluster labels are stamped in one place.
 
 ### 6.4 Metrics collected
 
-Everything below is collected every `collectionInterval` (default 30s). The lists match the collector image the operator deploys (`otel/opentelemetry-collector-contrib:0.165.0`). Each receiver's full reference is in its `documentation.md` upstream: [kubeletstats](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.165.0/receiver/kubeletstatsreceiver/documentation.md), [k8s_cluster](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.165.0/receiver/k8sclusterreceiver/documentation.md).
+Everything below is collected every `collectionInterval` (default 30s). The lists match the collector image the operator deploys (`otel/opentelemetry-collector-contrib:0.165.0`). Each receiver's full reference is in its `documentation.md` upstream: [kubelet_stats](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.165.0/receiver/kubeletstatsreceiver/documentation.md), [k8s_cluster](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/v0.165.0/receiver/k8sclusterreceiver/documentation.md).
 
 **Labels on every metric**
 
@@ -507,11 +532,11 @@ Everything below is collected every `collectionInterval` (default 30s). The list
 |---|---|
 | `k8s.cluster.name`, `deployment.environment` | gateway (`resource/cluster`, copied onto each datapoint by `transform/labels`) |
 | `k8s.node.name`, `k8s.namespace.name`, `k8s.pod.name`, `k8s.pod.uid`, `k8s.container.name` | the receiver, where the metric is about that object |
-| `k8s.deployment.name`, `k8s.statefulset.name`, `k8s.daemonset.name`, `k8s.job.name`, `k8s.cronjob.name` | agent (`k8sattributes`), for pod and container metrics |
+| `k8s.deployment.name`, `k8s.statefulset.name`, `k8s.daemonset.name`, `k8s.job.name`, `k8s.cronjob.name` | agent (`k8s_attributes`), for pod and container metrics |
 
 #### Agent (DaemonSet): usage, from each node's kubelet
 
-Receiver `kubeletstats`. `collect.nodes` turns on the **Node** column, and `collect.pods` turns on the **Pod** and **Container** columns. Every node reports only its own node, pods and containers.
+Receiver `kubelet_stats`. `collect.nodes` turns on the **Node** column, and `collect.pods` turns on the **Pod** and **Container** columns. Every node reports only its own node, pods and containers.
 
 | Metric (`<prefix>` = `k8s.node`, `k8s.pod` or `container`) | Unit | Node | Pod | Container | Meaning |
 |---|---|:-:|:-:|:-:|---|
@@ -539,13 +564,13 @@ That's 13 node, 13 pod and 11 container metrics.
 | `k8s.volume.*` | The `volume` metric group isn't enabled. Pod volume usage is already in `k8s.pod.filesystem.*`. |
 | `*_limit_utilization`, `*_request_utilization`, `*.node.utilization`, `*.uptime` | Optional upstream and off by default. They can be computed from `*.cpu.usage` / `*.memory.working_set` and the `k8s_cluster` limit and request metrics below. |
 
-#### Gateway (Deployment): state, from the API server
+#### Cluster collector (Deployment): state, from the API server
 
 Receiver `k8s_cluster`, turned on by `collect.nodes` **or** `collect.pods`. It reads object specs and statuses from the API server, so it reports what Kubernetes *wants* and *thinks*, not what is being used. It reports on the whole cluster, all namespaces.
 
 | Object | Metrics | Meaning |
 |---|---|---|
-| Node | `k8s.node.condition_ready`, `k8s.node.condition_memory_pressure`, `k8s.node.condition_disk_pressure`, `k8s.node.condition_pid_pressure` | `1` = condition is True, `0` = False, `-1` = Unknown. Chosen by `node_conditions_to_report` in the gateway config. |
+| Node | `k8s.node.condition_ready`, `k8s.node.condition_memory_pressure`, `k8s.node.condition_disk_pressure`, `k8s.node.condition_pid_pressure` | `1` = condition is True, `0` = False, `-1` = Unknown. Chosen by `node_conditions_to_report` in the cluster collector config. |
 | Namespace | `k8s.namespace.phase` | `1` = Active, `0` = Terminating |
 | Pod | `k8s.pod.phase` | `1` Pending, `2` Running, `3` Succeeded, `4` Failed, `5` Unknown |
 | Container | `k8s.container.ready` | `1` = passing its readiness probe |
@@ -564,11 +589,7 @@ Receiver `k8s_cluster`, turned on by `collect.nodes` **or** `collect.pods`. It r
 | ResourceQuota | `k8s.resource_quota.hard_limit`, `k8s.resource_quota.used` | Per namespace and resource, only where a quota exists. CPU is in millicores. |
 | ClusterResourceQuota (**OpenShift only**) | `openshift.clusterquota.limit` / `.used`, `openshift.appliedclusterquota.limit` / `.used` | Added by `distribution: openshift` when `platform: ocp` |
 
-`k8s_cluster` runs only in the gateway, once per cluster. In every agent it would report the same cluster state N times.
-
-#### Metrics from apps
-
-The gateway also forwards any metrics an app sends over OTLP to `<gateway>:4317` / `:4318` (see 6.2). Those are whatever the app defines. Drishti only adds the cluster labels.
+`k8s_cluster` runs only in the cluster collector, once per cluster. In every agent, or in every gateway replica, it would report the same cluster state several times.
 
 #### Metric names in Prometheus
 
@@ -603,6 +624,8 @@ curl -s http://localhost:9090/api/v1/label/__name__/values | tr ',' '\n' | grep 
 | **Requests = limits (Guaranteed QoS)** | `memory_limiter` uses the cgroup limit (80%) to shed load before an OOM-kill, and the scheduler reserves what the collector actually uses. |
 | **Label-filtered manager cache** | The manager only caches ConfigMaps, Services, Deployments and so on that carry `app.kubernetes.io/managed-by=drishti`. Without this it would cache every such object in the cluster. |
 | **Collectors run in the operator namespace** | One place for RBAC, Pod Security labels and network policy. `ensureNamespace` creates it for `make run`, and the operator never deletes it. |
+| **Cluster collector separate from the gateway** | Reading cluster state must happen exactly once per cluster; exporting is stateless and should scale. Keeping them in one Deployment forced the export path down to one replica. |
+| **Client-side gRPC load balancing via a headless Service** | gRPC holds one long-lived connection, so a normal Service would pin each agent to one gateway pod. `dns:///` + `round_robin` spreads requests over every replica. |
 
 ### 6.6 Platform differences
 
@@ -612,14 +635,15 @@ curl -s http://localhost:9090/api/v1/label/__name__/values | tr ',' '\n' | grep 
 | agent pod user | UID 10001 | UID 10001 | UID left to the SCC (restricted-v2 assigns one from the namespace range) |
 | logs on | root + read-only hostPath `/var/log/pods` | same | additionally `privileged: true` (SELinux), and the SA is bound to `system:openshift:scc:privileged` |
 | `k8s_cluster` | default | default | `distribution: openshift` (+ `clusterresourcequotas` read RBAC) |
-| default sizes (agent / gateway) | 200m, 256Mi / 500m, 1Gi | 200m, 256Mi / 500m, 1Gi | 250m, 384Mi / 500m, 1Gi |
+| default sizes (agent / cluster collector / each gateway replica) | 200m, 256Mi / 250m, 512Mi / 250m, 512Mi | same | 250m, 384Mi / 250m, 512Mi / 250m, 512Mi |
 
 ### 6.7 Security and RBAC
 
 - **Collector ClusterRole** (`drishti:<name>:collector`) is read-only (`get/list/watch`): nodes, `nodes/stats`, `nodes/proxy`, pods, namespaces, events, services, endpoints, RCs, quotas, PVs, PVCs; apps/*; batch/*; HPAs; `events.k8s.io` events; plus OpenShift quotas on `ocp`.
 - **Operator role**: Kubernetes RBAC refuses to let a subject grant permissions it doesn't hold (escalation prevention). The operator's [role.yaml](config/rbac/role.yaml), generated from the `+kubebuilder:rbac` markers, therefore includes those read rules too, plus `use` on the `privileged` SCC (OpenShift only) so it can create that binding. It doesn't use the `escalate` or `bind` verbs.
-- **Pod security**: the gateway, and the agent without logs, run non-root, with a read-only root filesystem, all capabilities dropped and `RuntimeDefault` seccomp. Log collection needs root and a hostPath mount, so the collector namespace is labelled `pod-security.kubernetes.io/enforce: privileged`.
-- **Transport**: agent → gateway is in-cluster plaintext gRPC. Add mTLS or a NetworkPolicy if your threat model needs it.
+- **Who gets the ClusterRole**: the agent and the cluster collector, through the `<name>-collector` ServiceAccount. The gateway gets **no token at all** (`automountServiceAccountToken: false`), because it never calls the Kubernetes API.
+- **Pod security**: the gateway, the cluster collector, and the agent without logs run non-root, with a read-only root filesystem, all capabilities dropped and `RuntimeDefault` seccomp. Log collection needs root and a hostPath mount, so the collector namespace is labelled `pod-security.kubernetes.io/enforce: privileged`.
+- **Transport**: agent / cluster collector → gateway is in-cluster plaintext gRPC. Add mTLS or a NetworkPolicy if your threat model needs it.
 
 ### 6.8 Status
 
@@ -630,13 +654,13 @@ status:
     - type: Ready
       status: "True"
       reason: AllComponentsRunning
-      message: "2 collectors created"
+      message: "3 collectors created"
 ```
 
 | reason | status | meaning |
 |---|---|---|
-| `AllComponentsRunning` | True | Gateway available, and every scheduled agent pod is updated and ready |
-| `Progressing` | False | Rolling out, for example `gateway ready, agent 2/3 nodes ready; 2 collectors created` |
+| `AllComponentsRunning` | True | All gateway replicas and the cluster collector available, and every scheduled agent pod is updated and ready |
+| `Progressing` | False | Rolling out, for example `gateway 1/2 ready, cluster collector ready, agent 2/3 nodes ready; 3 collectors created` |
 | `ReconcileError` | False | An API call failed. The message has the error and the reconcile is retried with backoff. |
 | `DuplicateClusterMonitoring` | False | Another ClusterMonitoring is active. This one does nothing. |
 
@@ -645,7 +669,8 @@ Changes to owned DaemonSet/Deployment status re-trigger reconcile, so `Ready` fo
 ### 6.9 Known limitations / next steps
 
 - Log tailing starts `at: end` with no checkpoint storage, so lines written while an agent pod restarts are lost. Next step: the `file_storage` extension on a hostPath.
-- The gateway is a single replica, so there is a short gap during its rollout.
+- The cluster collector is a single replica, so cluster state metrics and events have a short gap while it restarts or rolls out (`Recreate`). Running two with `k8s_leader_elector` (available in collector 0.165) would remove that gap.
+- The gateway replica count is fixed by `spec.gateway.replicas`. No HorizontalPodAutoscaler or PodDisruptionBudget is created yet.
 - No admission webhook yet. Validation is CRD schema + CEL only.
 - If a child object with the same name already exists without the `managed-by=drishti` label, it is not adopted and reconcile reports an `AlreadyExists` error.
 - Not yet: dashboards, alerts, and a Helm chart.
@@ -670,7 +695,13 @@ sequenceDiagram
     C->>A: ensure namespace drishti-system
     C->>A: SA, ClusterRole, ClusterRoleBinding (+ SCC binding on ocp+logs)
     C->>C: render gateway config (YAML) + hash
-    C->>A: gateway ConfigMap, Service, Deployment
+    C->>A: gateway ConfigMap, Service, headless Service, Deployment (N replicas)
+    alt nodes or pods or events
+      C->>C: render cluster collector config + hash
+      C->>A: cluster collector ConfigMap, Deployment (1 replica)
+    else
+      C->>A: delete cluster collector Deployment + ConfigMap
+    end
     alt nodes or pods or logs
       C->>C: render agent config + hash
       C->>A: agent ConfigMap, DaemonSet
@@ -690,9 +721,9 @@ Step by step for `kubectl apply -f yaml/cluster.yml`:
 1. The API server fills defaults (`logs: false`, `collectionInterval: 30s`, and so on), checks `platform ∈ {gke,eks,ocp}`, and stores the object.
 2. The controller receives the event and checks it is the only (oldest) ClusterMonitoring.
 3. It resolves effective settings: environment (CR → `--default-environment`), destination per signal (CR → install default → debug), and sizes (CR → platform default).
-4. It renders the two OTel configs from the toggles, writes them to ConfigMaps, and stamps their hash on the pod templates.
-5. Kubernetes schedules one agent per node and one gateway. The agents scrape the kubelet every `collectionInterval` and forward to the gateway, which adds cluster metrics and events, labels everything with `k8s.cluster.name=hlr-gke-prod`, `deployment.environment=prod`, and exports.
-6. When pods become ready, the owned-object watch fires again and the status turns `Ready=True: 2 collectors created`.
+4. It renders the three OTel configs from the toggles, writes them to ConfigMaps, and stamps their hash on the pod templates.
+5. Kubernetes schedules one agent per node, one cluster collector and the gateway replicas. The agents scrape the kubelet every `collectionInterval`, the cluster collector watches the API server, and both forward to the gateways, which label everything with `k8s.cluster.name=hlr-gke-prod`, `deployment.environment=prod`, and export.
+6. When pods become ready, the owned-object watch fires again and the status turns `Ready=True: 3 collectors created`.
 7. `kubectl delete cmon hlr-gke-prod` removes everything through owner-reference garbage collection.
 
 ---
@@ -706,16 +737,18 @@ Step by step for `kubectl apply -f yaml/cluster.yml`:
 | `spec.platform` | `gke` \| `eks` \| `ocp` | yes | none | Selects platform-specific settings |
 | `spec.clusterName` | string (1–63) | yes | none | Label on all data. **Immutable.** |
 | `spec.environment` | string (≤63) | no | `--default-environment` (`dev`) | `deployment.environment` label |
-| `spec.collect.nodes` | bool | no | `true` | kubeletstats `node` + k8s_cluster |
-| `spec.collect.pods` | bool | no | `true` | kubeletstats `pod`, `container` + k8s_cluster |
-| `spec.collect.events` | bool | no | `true` | k8sobjects events → `logs/events` pipeline, `service.name: kubernetes-events` |
-| `spec.collect.logs` | bool | no | `false` | filelog on every node (root + hostPath) |
-| `spec.collectionInterval` | duration | no | `30s` | kubeletstats + k8s_cluster interval |
+| `spec.collect.nodes` | bool | no | `true` | kubelet_stats `node` + k8s_cluster |
+| `spec.collect.pods` | bool | no | `true` | kubelet_stats `pod`, `container` + k8s_cluster |
+| `spec.collect.events` | bool | no | `true` | k8s_objects events → `logs/events` pipeline, `service.name: kubernetes-events` |
+| `spec.collect.logs` | bool | no | `false` | file_log on every node (root + hostPath) |
+| `spec.collectionInterval` | duration | no | `30s` | kubelet_stats + k8s_cluster interval |
+| `spec.gateway.replicas` | int (1–20) | no | `2` | Number of gateway pods sharing the export load |
 | `spec.destination.metrics` | URL `^https?://` | no | install default | OTLP/HTTP base URL |
 | `spec.destination.traces` | URL | no | install default | |
 | `spec.destination.logs` | URL | no | install default | |
 | `spec.collectorResources.perNode.{cpu,memory}` | quantity | no | per platform | Agent requests = limits |
-| `spec.collectorResources.central.{cpu,memory}` | quantity | no | per platform | Gateway requests = limits |
+| `spec.collectorResources.central.{cpu,memory}` | quantity | no | `250m`, `512Mi` | Each gateway replica, requests = limits |
+| `spec.collectorResources.clusterCollector.{cpu,memory}` | quantity | no | `250m`, `512Mi` | Cluster collector, requests = limits. Raise memory on large clusters. |
 | `status.observedGeneration` | int | | | |
 | `status.conditions[type=Ready]` | Condition | | | See [6.8](#68-status) |
 
@@ -731,11 +764,13 @@ Full schema: [config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml](co
 | `go: command not found` in WSL | Fix the PATH ([1.1](#11-fix-go-on-the-path)) |
 | `Ready=False … agent 0/3 nodes ready` for a long time | `kubectl -n drishti-system describe ds hlr-gke-prod-agent` and look at pod events: image pull, PSA rejection, SCC |
 | Agent pods `CrashLoopBackOff` | `kubectl -n drishti-system logs ds/hlr-gke-prod-agent`. The collector prints the invalid config key. |
-| kubeletstats `401/403` | ClusterRole must include `nodes/stats` and `nodes/proxy`: `kubectl get clusterrole drishti:hlr-gke-prod:collector -o yaml` |
+| kubelet_stats `401/403` | ClusterRole must include `nodes/stats` and `nodes/proxy`: `kubectl get clusterrole drishti:hlr-gke-prod:collector -o yaml` |
 | `forbidden: ... attempting to grant RBAC permissions not currently held` | The operator role is out of date. Run `make manifests` then `make deploy`. |
 | Pods rejected by Pod Security with `logs: true` | The namespace needs `pod-security.kubernetes.io/enforce=privileged` |
 | `DuplicateClusterMonitoring` | `kubectl get cmon` and delete the extra one |
-| Nothing reaches the backend | `kubectl -n drishti-system logs deploy/hlr-gke-prod-gateway` and look for exporter errors. Confirm the endpoint resolves from inside the cluster. |
+| Nothing reaches the backend | `kubectl -n drishti-system logs -l app.kubernetes.io/component=gateway --prefix` and look for exporter errors. Confirm the endpoint resolves from inside the cluster. |
+| No cluster state metrics or events | `kubectl -n drishti-system logs deploy/hlr-gke-prod-cluster-collector`. A `403` means the collector ClusterRole is missing a resource. |
+| One gateway pod gets all the traffic | `kubectl -n drishti-system get endpoints hlr-gke-prod-gateway-headless` must list every gateway pod. Collectors pick up new pods after their next DNS re-resolve (a few minutes). |
 
 ---
 
@@ -749,7 +784,7 @@ Full schema: [config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml](co
 ├── cmd/main.go                         # manager: flags/env defaults, label-filtered cache
 ├── internal/controller/
 │   ├── clustermonitoring_controller.go # Reconcile, status, RBAC markers, watches
-│   ├── collector_config.go             # renders agent + gateway OTel configs
+│   ├── collector_config.go             # renders agent, cluster collector and gateway OTel configs
 │   ├── resources.go                    # SA / RBAC / ConfigMap / DaemonSet / Deployment / Service builders
 │   ├── options.go                      # install-time defaults and precedence rules
 │   ├── *_test.go                       # envtest + rendering tests
