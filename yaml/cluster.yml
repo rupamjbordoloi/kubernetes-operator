@@ -11,7 +11,7 @@
 #   apiVersion: monitoring.drishti.io/v1alpha1
 #   kind: ClusterMonitoring
 #   metadata:
-#     name: hlr-gke-prod
+#     name: platform
 #   spec:
 #     platform: gke
 #     clusterName: hlr-gke-prod
@@ -19,7 +19,7 @@
 apiVersion: monitoring.drishti.io/v1alpha1
 kind: ClusterMonitoring
 metadata:
-  name: hlr-gke-prod
+  name: platform
 spec:
   # REQUIRED. Allowed: gke | eks | ocp
   # Why: each platform needs different settings (e.g. OpenShift needs extra

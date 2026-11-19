@@ -1,5 +1,22 @@
 # Drishti operator: `ClusterMonitoring`
 
+## Contents
+
+0. [Quick start](#quick-start)
+   - [Quick start behind Zscaler](#quick-start-behind-zscaler)
+1. [Prerequisites](#1-prerequisites)
+2. [How this project was scaffolded](#2-how-this-project-was-scaffolded)
+3. [Build and test](#3-build-and-test)
+4. [Run on a local kind cluster](#4-run-on-a-local-kind-cluster)
+5. [Send data to a real backend](#5-send-data-to-a-real-backend)
+6. [Design document](#6-design-document)
+7. [How it works: reconcile loop](#7-how-it-works-reconcile-loop)
+8. [API reference](#8-api-reference)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Project layout](#10-project-layout)
+
+---
+
 A Kubernetes operator built with [Kubebuilder](https://book.kubebuilder.io) that sets up logs and metrics collection for a whole cluster from one small custom resource.
 
 You write this:
@@ -29,18 +46,21 @@ The full annotated example is [yaml/cluster.yml](yaml/cluster.yml).
 
 ## Quick start
 
-Local development from zero to dashboards. Run everything in **WSL**, from the repo root, with the tools in [1. Prerequisites](#1-prerequisites-wsl) installed and Docker Desktop running.
+Local development from zero to dashboards. Run every command from the **root of the project**, with the tools in [1. Prerequisites](#1-prerequisites) installed and Podman running. Behind Zscaler (or any proxy that inspects HTTPS), create the cluster as described in [Quick start behind Zscaler](#quick-start-behind-zscaler) instead of step 1.
 
 **Terminal 1: cluster, backends, operator**
 
-```bash
-cd /mnt/d/rupam/go/kubernetes-operator
+Go to the root of the project, then:
 
-# 1. Local cluster: 1 control plane + 2 workers. This also creates the "kind" Docker network.
+```bash
+# 0. kind uses Podman instead of Docker
+export KIND_EXPERIMENTAL_PROVIDER=podman
+
+# 1. Local cluster: 1 control plane + 2 workers. This also creates the "kind" network.
 kind create cluster --name drishti --config yaml/kind-config.yaml
 
 # 2. Prometheus, Loki, Tempo and Grafana on the "kind" network (data is in memory only)
-docker compose -f demo/infrastructure/docker-compose.yaml up -d
+podman compose -f demo/infrastructure/docker-compose.yaml up -d
 
 # 3. Point the operator at those backends
 export DRISHTI_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp DRISHTI_LOGS_ENDPOINT=http://loki:3100/otlp DRISHTI_TRACES_ENDPOINT=http://tempo:4318
@@ -51,9 +71,9 @@ make install run
 
 **Terminal 2: turn on monitoring and look at the data**
 
-```bash
-cd /mnt/d/rupam/go/kubernetes-operator
+Go to the root of the project, then:
 
+```bash
 # 5. Ask for monitoring of this cluster
 kubectl apply -f yaml/cluster.yml
 
@@ -79,7 +99,7 @@ Open **Grafana at http://localhost:3000** (no login) → **Explore**:
 
 ```bash
 kubectl delete -f yaml/cluster.yml                              # removes every collector
-docker compose -f demo/infrastructure/docker-compose.yaml down  # stops the backends, data is discarded
+podman compose -f demo/infrastructure/docker-compose.yaml down  # stops the backends, data is discarded
 kind delete cluster --name drishti
 ```
 
@@ -87,25 +107,89 @@ The rest of this README explains each step in detail: [4. Run on a local kind cl
 
 ---
 
-## Contents
+## Quick start behind Zscaler
 
-0. [Quick start](#quick-start)
-1. [Prerequisites (WSL)](#1-prerequisites-wsl)
-2. [How this project was scaffolded](#2-how-this-project-was-scaffolded)
-3. [Build and test](#3-build-and-test)
-4. [Run on a local kind cluster](#4-run-on-a-local-kind-cluster)
-5. [Send data to a real backend](#5-send-data-to-a-real-backend)
-6. [Design document](#6-design-document)
-7. [How it works: reconcile loop](#7-how-it-works-reconcile-loop)
-8. [API reference](#8-api-reference)
-9. [Troubleshooting](#9-troubleshooting)
-10. [Project layout](#10-project-layout)
+Zscaler inspects HTTPS by replacing every site's certificate with one signed by the Zscaler root certificate. Podman and the kind nodes don't trust that certificate, so image pulls fail with `x509: certificate signed by unknown authority`. The steps below make both trust it. Steps 1 to 4 are done **once**; after that, step 5 replaces step 1 of the [Quick start](#quick-start) every time you create the cluster.
+
+Go to the root of the project, then:
+
+**1. Save the Zscaler root certificate in PEM format as `~/zscaler.crt`.** Export it from the system keychain, or ask IT for it:
+
+```bash
+security find-certificate -a -c "Zscaler" -p /Library/Keychains/System.keychain > ~/zscaler.crt
+```
+
+If you were given a `.cer` file instead, convert it (it is often binary DER):
+
+```bash
+openssl x509 -inform der -in ~/Downloads/ZscalerRootCertificate.cer -out ~/zscaler.crt
+```
+
+Check it. This must print `subject=... Zscaler ...`:
+
+```bash
+openssl x509 -in ~/zscaler.crt -noout -subject
+```
+
+**2. Build a CA bundle: the system's public CAs plus Zscaler.** The kind nodes will use this file as their list of trusted CAs:
+
+```bash
+cat "$(ls /etc/ssl/cert.pem /etc/ssl/certs/ca-certificates.crt 2>/dev/null | head -1)" ~/zscaler.crt > ~/.kind-ca-bundle.crt
+```
+
+**3. Trust Zscaler in the Podman VM.** Only needed when Podman runs its containers in a VM (`podman machine`). The certificate stays there across restarts; redo this step only after `podman machine rm`:
+
+```bash
+podman machine ssh "sudo tee /etc/pki/ca-trust/source/anchors/zscaler.crt > /dev/null && sudo update-ca-trust" < ~/zscaler.crt
+```
+
+**4. Create `yaml/kind-config-zscaler.yml`.** Same cluster as `yaml/kind-config.yaml`, plus the bundle mounted into every node as its trusted CA list:
+
+```bash
+cat > yaml/kind-config-zscaler.yml <<EOF
+# Generated from the README (Quick start behind Zscaler). Not committed:
+# it contains your home directory path.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts: &ca
+      - hostPath: $HOME/.kind-ca-bundle.crt
+        containerPath: /etc/ssl/certs/ca-certificates.crt
+        readOnly: true
+  - role: worker
+    extraMounts: *ca
+  - role: worker
+    extraMounts: *ca
+EOF
+```
+
+Run it exactly like this rather than copying the YAML into a file by hand. kind doesn't expand variables, so the file must contain your real home path, and the shell writes it in place of `$HOME` here. Check it: the `hostPath` must start with your home directory, not `$HOME`:
+
+```bash
+grep hostPath yaml/kind-config-zscaler.yml
+```
+
+The file is listed in `.gitignore`, so it is never pushed.
+
+**5. Create the cluster from it** (instead of step 1 of the Quick start):
+
+```bash
+export KIND_EXPERIMENTAL_PROVIDER=podman
+kind create cluster --name drishti --config yaml/kind-config-zscaler.yml
+```
+
+Image pulls now work on every node, with no further steps. Check one:
+
+```bash
+podman exec drishti-control-plane crictl pull docker.io/otel/opentelemetry-collector-contrib:0.165.0
+```
+
+Then continue with step 2 of the [Quick start](#quick-start). When Zscaler rotates its root certificate (rare), redo steps 1 to 3 and recreate the cluster.
 
 ---
 
-## 1. Prerequisites (WSL)
-
-Run every command in this README inside **WSL (Ubuntu)**, not in PowerShell or cmd. The repo lives on the Windows drive and is reached from WSL at `/mnt/d/rupam/go/kubernetes-operator`.
+## 1. Prerequisites
 
 | Tool | Version used | Check |
 |---|---|---|
@@ -113,43 +197,51 @@ Run every command in this README inside **WSL (Ubuntu)**, not in PowerShell or c
 | Kubebuilder | v4.16.0 | `kubebuilder version` |
 | kind | any recent | `kind version` |
 | kubectl | matches cluster (1.37) | `kubectl version --client` |
-| Docker | Docker Desktop with WSL integration | `docker ps` |
+| Podman | with `podman compose` working | `podman info` |
 | make | GNU make | `make --version` |
 
-### 1.1 Fix Go on the PATH
+### 1.1 Put Go on the PATH
 
-Go is installed at `/usr/local/go`. `~/.bashrc` currently sets `GOPATH=/usr/local/go`, which is the Go **install** directory (GOROOT), not a workspace, and Go ignores it with a warning. Replace it:
+Tools installed with `go install` (and by this project's Makefile) go into `$(go env GOPATH)/bin`. Make sure that directory is on the PATH, for example in your shell profile:
 
 ```bash
-sed -i 's|^export GOPATH=/usr/local/go$|export GOPATH=$HOME/go|' ~/.bashrc
-cat >> ~/.bashrc <<'EOF'
-export PATH=/usr/local/go/bin:$HOME/go/bin:$PATH
-EOF
-source ~/.bashrc
+export PATH="$(go env GOPATH)/bin:$PATH"
 go version
 ```
 
 ### 1.2 Install kubectl
 
 ```bash
-curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/$(go env GOOS)/$(go env GOARCH)/kubectl"
 sudo install -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl
 kubectl version --client
 ```
 
-### 1.3 Make Docker usable from WSL
+### 1.3 Set up Podman for kind
 
-kind needs Docker. In **Docker Desktop → Settings → Resources → WSL integration**, turn on the integration for `Ubuntu-20.04`, click *Apply & restart*, then in a new WSL shell:
+kind runs each Kubernetes node as a container. Tell it to use Podman, and add the line to your shell profile so it applies to every terminal:
 
 ```bash
-docker ps        # must not say "could not be found in this WSL 2 distro"
+export KIND_EXPERIMENTAL_PROVIDER=podman
+```
+
+If Podman runs its containers in a VM, start it first:
+
+```bash
+podman machine start
+```
+
+`podman compose` hands off to a compose provider, so one must be installed (for example `podman-compose`). Check:
+
+```bash
+podman compose version
 ```
 
 ### 1.4 Install kind and kubebuilder (if missing)
 
 ```bash
 # kind
-curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+curl -Lo ./kind "https://kind.sigs.k8s.io/dl/latest/kind-$(go env GOOS)-$(go env GOARCH)"
 sudo install -m 0755 kind /usr/local/bin/kind && rm kind
 
 # kubebuilder
@@ -161,11 +253,9 @@ sudo install -m 0755 kubebuilder /usr/local/bin/kubebuilder && rm kubebuilder
 
 ## 2. How this project was scaffolded
 
-You don't need to run these again. They are recorded so the project can be rebuilt from nothing.
+You don't need to run these again. They are recorded so the project can be rebuilt from nothing. From the root of the project:
 
 ```bash
-cd /mnt/d/rupam/go/kubernetes-operator
-
 # Go module + manager + kustomize config. Project name "drishti" gives the
 # namespace drishti-system and the name prefix drishti-.
 kubebuilder init \
@@ -192,9 +282,9 @@ The hand-written code is:
 
 ## 3. Build and test
 
-```bash
-cd /mnt/d/rupam/go/kubernetes-operator
+From the root of the project:
 
+```bash
 make manifests   # regenerate CRD + RBAC from the // +kubebuilder markers
 make generate    # regenerate zz_generated.deepcopy.go
 make build       # go build -> bin/manager
@@ -215,15 +305,16 @@ What the tests cover:
 - **Singleton**: a second ClusterMonitoring is marked `DuplicateClusterMonitoring` and creates nothing
 - **Config rendering**: pipelines per toggle, self-log exclusion, the debug-exporter fallback, per-signal destination override
 
-> Building on `/mnt/d` is slower than on the Linux filesystem. For faster builds, clone into `~/src` inside WSL.
-
 ---
 
 ## 4. Run on a local kind cluster
 
 ### 4.1 Create the cluster
 
+Behind Zscaler, use `yaml/kind-config-zscaler.yml` instead (see [Quick start behind Zscaler](#quick-start-behind-zscaler)).
+
 ```bash
+export KIND_EXPERIMENTAL_PROVIDER=podman
 kind create cluster --name drishti --config yaml/kind-config.yaml
 kubectl get nodes          # 1 control-plane + 2 workers
 ```
@@ -235,14 +326,17 @@ make install               # applies the CRD only
 make run                   # runs the controller locally against ~/.kube/config
 ```
 
-The controller creates the `drishti-system` namespace itself if it is missing. Leave it running and open a second WSL terminal for the next steps.
+The controller creates the `drishti-system` namespace itself if it is missing. Leave it running and open a second terminal for the next steps.
 
 ### 4.3 Option B: deploy the operator into the cluster
 
+Podman names local images `localhost/<name>`, so use that name everywhere. `kind load` reads the image from an archive file:
+
 ```bash
-make docker-build IMG=drishti-operator:dev
-kind load docker-image drishti-operator:dev --name drishti
-make deploy IMG=drishti-operator:dev
+make docker-build CONTAINER_TOOL=podman IMG=localhost/drishti-operator:dev
+podman save -o /tmp/drishti-operator.tar localhost/drishti-operator:dev
+kind load image-archive /tmp/drishti-operator.tar --name drishti
+make deploy IMG=localhost/drishti-operator:dev
 
 kubectl -n drishti-system get deploy drishti-controller-manager
 kubectl -n drishti-system logs deploy/drishti-controller-manager -f
@@ -321,8 +415,8 @@ To check the generated configs against the exact collector version without a clu
 
 ```bash
 mkdir -p ~/otel && cd ~/otel
-curl -sSLO https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.165.0/otelcol-contrib_0.165.0_linux_amd64.tar.gz
-tar xzf otelcol-contrib_0.165.0_linux_amd64.tar.gz otelcol-contrib
+curl -sSLO "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.165.0/otelcol-contrib_0.165.0_$(go env GOOS)_$(go env GOARCH).tar.gz"
+tar xzf otelcol-contrib_0.165.0_*.tar.gz otelcol-contrib
 kubectl -n drishti-system get cm hlr-gke-prod-gateway -o jsonpath='{.data.config\.yaml}' > gateway.yaml
 ./otelcol-contrib validate --config=gateway.yaml
 ```
@@ -362,7 +456,7 @@ With `make run`, export the same variables before starting.
 
 ### 5.1 Local stack: Prometheus, Loki, Tempo and Grafana
 
-[demo/infrastructure/](demo/infrastructure/) runs all four backends with Docker Compose next to the kind cluster:
+[demo/infrastructure/](demo/infrastructure/) runs all four backends with `podman compose` next to the kind cluster:
 
 | Service | Receives | Browser |
 |---|---|---|
@@ -373,12 +467,12 @@ With `make run`, export the same variables before starting.
 
 No extra OpenTelemetry Collector runs in Compose: the Drishti gateway is already one and sends OTLP straight to the backends.
 
-Every service joins the `kind` Docker network. kind makes Docker's DNS available to pods, so the gateway reaches them by name (`prometheus`, `loki`, `tempo`). The `kind` network exists only after a kind cluster is created, so start the cluster first.
+Every service joins the `kind` network. The kind nodes use that network's DNS, so the gateway reaches the services by name (`prometheus`, `loki`, `tempo`). The `kind` network exists only after a kind cluster is created, so start the cluster first.
 
 ```bash
 # 1. Cluster (4.1), then the backends
-docker compose -f demo/infrastructure/docker-compose.yaml up -d
-docker compose -f demo/infrastructure/docker-compose.yaml ps     # all "running" / tempo-init "exited (0)"
+podman compose -f demo/infrastructure/docker-compose.yaml up -d
+podman compose -f demo/infrastructure/docker-compose.yaml ps     # all "running" / tempo-init "exited (0)"
 
 # 2. Operator with the backends as install-time defaults (Option A)
 export DRISHTI_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp
@@ -407,7 +501,7 @@ Then in Grafana (http://localhost:3000 → **Explore**):
 - **Prometheus**: `k8s_node_memory_working_set_bytes`, or `sum by (k8s_pod_name) (k8s_pod_cpu_usage{k8s_namespace_name="drishti-system"})`
 - **Loki**, everything from this cluster: `{k8s_cluster_name="hlr-gke-prod"}`. Only Kubernetes events (`collect.events: true`): `{service_name="kubernetes-events"}`, or warnings only: `{service_name="kubernetes-events"} | json | object_type="Warning"`. Container logs (`collect.logs: true`) are named after their container, e.g. `{service_name="coredns"}`.
 
-Stop the stack with `docker compose -f demo/infrastructure/docker-compose.yaml down`. Nothing is persisted: every service keeps its data in `tmpfs` (memory), so it is discarded whenever a container stops, including when Docker Desktop restarts. The containers come back empty on their own (`restart: unless-stopped`); Grafana re-provisions its datasources on every start.
+Stop the stack with `podman compose -f demo/infrastructure/docker-compose.yaml down`. Nothing is persisted: every service keeps its data in `tmpfs` (memory), so it is discarded whenever a container stops, including when Podman (or its VM) restarts. The containers come back empty on their own (`restart: unless-stopped`); Grafana re-provisions its datasources on every start.
 
 ---
 
@@ -760,8 +854,10 @@ Full schema: [config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml](co
 
 | Symptom | Check / fix |
 |---|---|
-| `docker: could not be found in this WSL 2 distro` | Turn on Docker Desktop WSL integration ([1.3](#13-make-docker-usable-from-wsl)) |
-| `go: command not found` in WSL | Fix the PATH ([1.1](#11-fix-go-on-the-path)) |
+| `kind` can't find the cluster, or tries to use Docker | `export KIND_EXPERIMENTAL_PROVIDER=podman` ([1.3](#13-set-up-podman-for-kind)) |
+| `go: command not found`, or tools from `go install` not found | Fix the PATH ([1.1](#11-put-go-on-the-path)) |
+| Image pull: `x509: certificate signed by unknown authority` | HTTPS is being inspected (Zscaler). Follow [Quick start behind Zscaler](#quick-start-behind-zscaler). |
+| Image pull: `lookup registry-1.docker.io on [fc00:...]:53: no such host` | Podman's DNS on the IPv6 side of the `kind` network isn't answering. Recreate the network as IPv4 only: `kind delete cluster --name drishti`, `podman network rm kind`, `podman network create kind`, then create the cluster again. |
 | `Ready=False … agent 0/3 nodes ready` for a long time | `kubectl -n drishti-system describe ds hlr-gke-prod-agent` and look at pod events: image pull, PSA rejection, SCC |
 | Agent pods `CrashLoopBackOff` | `kubectl -n drishti-system logs ds/hlr-gke-prod-agent`. The collector prints the invalid config key. |
 | kubelet_stats `401/403` | ClusterRole must include `nodes/stats` and `nodes/proxy`: `kubectl get clusterrole drishti:hlr-gke-prod:collector -o yaml` |
@@ -795,7 +891,7 @@ Full schema: [config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml](co
 │   ├── manager/manager.yaml            # operator Deployment + env defaults
 │   ├── default/                        # kustomize entry for make deploy (ns drishti-system)
 │   └── samples/                        # example CR (logs on)
-├── demo/infrastructure/                # docker compose: Prometheus, Loki, Tempo, Grafana (5.1)
+├── demo/infrastructure/                # compose file: Prometheus, Loki, Tempo, Grafana (5.1)
 ├── yaml/
 │   ├── cluster.yml                     # the annotated ClusterMonitoring this operator implements
 │   └── kind-config.yaml                # 1 control-plane + 2 workers
