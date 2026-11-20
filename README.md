@@ -721,6 +721,7 @@ curl -s http://localhost:9090/api/v1/label/__name__/values | tr ',' '\n' | grep 
 | | GKE | EKS | OpenShift (ocp) |
 |---|---|---|---|
 | kubelet endpoint | `https://<hostIP>:10250`, `insecure_skip_verify` (self-signed kubelet certs) | same | same |
+| node selection | all collector pods have `nodeSelector: kubernetes.io/os: linux`, so Windows node pools are skipped (the collector image is Linux-only) | same | same |
 | agent pod user | UID 10001 | UID 10001 | UID left to the SCC (restricted-v2 assigns one from the namespace range) |
 | logs on | root + read-only hostPath `/var/log/pods` | same | additionally `privileged: true` (SELinux), and the SA is bound to `system:openshift:scc:privileged` |
 | `k8s_cluster` | default | default | `distribution: openshift` (+ `clusterresourcequotas` read RBAC) |

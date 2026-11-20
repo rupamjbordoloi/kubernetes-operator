@@ -106,6 +106,8 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		Expect(ds.Spec.Template.Spec.Volumes).To(ContainElement(HaveField("Name", "varlogpods")))
 		// A slow start (throttled CPU) must not be killed by the liveness probe.
 		Expect(ds.Spec.Template.Spec.Containers[0].StartupProbe).NotTo(BeNil())
+		// The collector image is Linux-only: never schedule onto Windows nodes.
+		Expect(ds.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue(corev1.LabelOSStable, "linux"))
 		Expect(ds.Spec.Template.Annotations).To(HaveKey(configHashAnnotation))
 		Expect(ds.OwnerReferences).To(HaveLen(1))
 
@@ -115,6 +117,7 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 			gwDep)).To(Succeed())
 		Expect(gwDep.Spec.Replicas).To(Equal(new(int32(2))))
 		Expect(gwDep.Spec.Template.Spec.AutomountServiceAccountToken).To(Equal(new(false)))
+		Expect(gwDep.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue(corev1.LabelOSStable, "linux"))
 		Expect(gwDep.Spec.Strategy.RollingUpdate.MaxUnavailable.IntValue()).To(Equal(0))
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-gateway", Namespace: ns},
 			&corev1.Service{})).To(Succeed())
@@ -134,6 +137,7 @@ var _ = Describe("ClusterMonitoring Controller", func() {
 		Expect(ccDep.Spec.Replicas).To(Equal(new(int32(1))))
 		Expect(ccDep.Spec.Strategy.Type).To(Equal(appsv1.RecreateDeploymentStrategyType))
 		Expect(ccDep.Spec.Template.Spec.ServiceAccountName).To(Equal(resourceName + "-collector"))
+		Expect(ccDep.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue(corev1.LabelOSStable, "linux"))
 		ccCM := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-cluster-collector", Namespace: ns},
 			ccCM)).To(Succeed())

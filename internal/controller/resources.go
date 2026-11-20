@@ -238,6 +238,13 @@ func collectorContainer(image string, res corev1.ResourceRequirements) corev1.Co
 	}
 }
 
+// linuxOnly keeps collector pods off Windows nodes (GKE and EKS both offer
+// Windows node pools). The collector image is built for Linux only, so a pod
+// placed on a Windows node could never start.
+func linuxOnly() map[string]string {
+	return map[string]string{corev1.LabelOSStable: "linux"}
+}
+
 func configVolume(configMapName string) corev1.Volume {
 	return corev1.Volume{Name: "config", VolumeSource: corev1.VolumeSource{
 		ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: configMapName}},
@@ -319,8 +326,10 @@ func mutateAgentDaemonSet(cm *monitoringv1alpha1.ClusterMonitoring, ds *appsv1.D
 			SecurityContext:    podSec,
 			Containers:         []corev1.Container{container},
 			Volumes:            volumes,
-			// Run on every node, including tainted control-plane / GPU nodes.
-			Tolerations: []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
+			// Run on every Linux node, including tainted control-plane / GPU
+			// nodes. Windows nodes are skipped: the collector image is Linux-only.
+			NodeSelector: linuxOnly(),
+			Tolerations:  []corev1.Toleration{{Operator: corev1.TolerationOpExists}},
 		},
 	}
 }
@@ -351,6 +360,7 @@ func mutateClusterCollectorDeployment(cm *monitoringv1alpha1.ClusterMonitoring, 
 			SecurityContext:    podSecurity(cm),
 			Containers:         []corev1.Container{container},
 			Volumes:            []corev1.Volume{configVolume(clusterCollectorName(cm))},
+			NodeSelector:       linuxOnly(),
 		},
 	}
 }
@@ -390,6 +400,7 @@ func mutateGatewayDeployment(cm *monitoringv1alpha1.ClusterMonitoring, dep *apps
 			SecurityContext:              podSecurity(cm),
 			Containers:                   []corev1.Container{container},
 			Volumes:                      []corev1.Volume{configVolume(gatewayName(cm))},
+			NodeSelector:                 linuxOnly(),
 			// Spread replicas over nodes, so losing one node keeps the others.
 			TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
 				MaxSkew:           1,
