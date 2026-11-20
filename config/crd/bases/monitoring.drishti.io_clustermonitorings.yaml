@@ -174,10 +174,6 @@ spec:
                     description: metrics OTLP/HTTP endpoint, e.g. http://prometheus.observability.svc:9090/api/v1/otlp
                     pattern: ^https?://
                     type: string
-                  traces:
-                    description: traces OTLP/HTTP endpoint, e.g. http://tempo.observability.svc:4318
-                    pattern: ^https?://
-                    type: string
                 type: object
               environment:
                 description: |-

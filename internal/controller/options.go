@@ -63,9 +63,6 @@ func (o Options) destination(cm *monitoringv1alpha1.ClusterMonitoring) monitorin
 	if cm.Spec.Destination.Metrics != "" {
 		d.Metrics = cm.Spec.Destination.Metrics
 	}
-	if cm.Spec.Destination.Traces != "" {
-		d.Traces = cm.Spec.Destination.Traces
-	}
 	if cm.Spec.Destination.Logs != "" {
 		d.Logs = cm.Spec.Destination.Logs
 	}

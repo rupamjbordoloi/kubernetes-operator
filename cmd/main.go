@@ -88,8 +88,6 @@ func main() {
 			"Empty = debug exporter.")
 	flag.StringVar(&drishtiOpts.Destination.Logs, "default-logs-endpoint", os.Getenv("DRISHTI_LOGS_ENDPOINT"),
 		"Default OTLP/HTTP logs endpoint (e.g. http://loki.observability.svc:3100/otlp). Empty = debug exporter.")
-	flag.StringVar(&drishtiOpts.Destination.Traces, "default-traces-endpoint", os.Getenv("DRISHTI_TRACES_ENDPOINT"),
-		"Default OTLP/HTTP traces endpoint (e.g. http://tempo.observability.svc:4318). Empty = debug exporter.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -207,7 +205,7 @@ func main() {
 	setupLog.Info("Drishti defaults",
 		"collectorNamespace", drishtiOpts.Namespace, "collectorImage", drishtiOpts.CollectorImage,
 		"environment", drishtiOpts.Environment, "metricsEndpoint", drishtiOpts.Destination.Metrics,
-		"logsEndpoint", drishtiOpts.Destination.Logs, "tracesEndpoint", drishtiOpts.Destination.Traces)
+		"logsEndpoint", drishtiOpts.Destination.Logs)
 	if err := (&controller.ClusterMonitoringReconciler{
 		Client:  mgr.GetClient(),
 		Scheme:  mgr.GetScheme(),

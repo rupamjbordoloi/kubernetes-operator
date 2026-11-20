@@ -63,7 +63,7 @@ kind create cluster --name drishti --config yaml/kind-config.yaml
 podman compose -f demo/infrastructure/docker-compose.yaml up -d
 
 # 3. Point the operator at those backends
-export DRISHTI_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp DRISHTI_LOGS_ENDPOINT=http://loki:3100/otlp DRISHTI_TRACES_ENDPOINT=http://tempo:4318
+export DRISHTI_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp DRISHTI_LOGS_ENDPOINT=http://loki:3100/otlp
 
 # 4. Install the CRD and run the operator from source (keep this terminal open)
 make install run
@@ -431,7 +431,6 @@ Backends are install-time settings, the "Helm values". SREs normally don't set t
 |---|---|---|---|
 | metrics | `DRISHTI_METRICS_ENDPOINT` | `--default-metrics-endpoint` | `http://prometheus:9090/api/v1/otlp` |
 | logs | `DRISHTI_LOGS_ENDPOINT` | `--default-logs-endpoint` | `http://loki:3100/otlp` |
-| traces | `DRISHTI_TRACES_ENDPOINT` | `--default-traces-endpoint` | `http://tempo:4318` |
 | environment | `DRISHTI_DEFAULT_ENVIRONMENT` | `--default-environment` | `prod` |
 | collector image | `DRISHTI_COLLECTOR_IMAGE` | `--collector-image` | `otel/opentelemetry-collector-contrib:0.165.0` |
 
@@ -440,8 +439,7 @@ Set them permanently in [config/manager/manager.yaml](config/manager/manager.yam
 ```bash
 kubectl -n drishti-system set env deploy/drishti-controller-manager \
   DRISHTI_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp \
-  DRISHTI_LOGS_ENDPOINT=http://loki:3100/otlp \
-  DRISHTI_TRACES_ENDPOINT=http://tempo:4318
+  DRISHTI_LOGS_ENDPOINT=http://loki:3100/otlp
 ```
 
 With `make run`, export the same variables before starting.
@@ -452,7 +450,6 @@ With `make run`, export the same variables before starting.
 
 - *Prometheus 3.x*: start it with `--web.enable-otlp-receiver`; the base URL is `/api/v1/otlp` and the collector appends `/v1/metrics`. The gateway copies `k8s.cluster.name` and `deployment.environment` onto every datapoint, so they appear as `k8s_cluster_name` / `deployment_environment` labels. Pod, namespace and node names are resource attributes: list them under `otlp.promote_resource_attributes` in `prometheus.yml` to get them as labels.
 - *Loki 3.x*: native OTLP at `/otlp`. Needs `allow_structured_metadata: true` (the default with schema v13).
-- *Tempo*: OTLP/HTTP on port 4318; the collector appends `/v1/traces`. Drishti collects no traces (application monitoring isn't part of cluster monitoring), so this endpoint is optional.
 
 ### 5.1 Local stack: Prometheus, Loki, Tempo and Grafana
 
@@ -462,7 +459,7 @@ With `make run`, export the same variables before starting.
 |---|---|---|
 | Prometheus | metrics (OTLP) | http://localhost:9090 |
 | Loki | logs and Kubernetes events (OTLP) | http://localhost:3100/ready |
-| Tempo | traces (OTLP) | http://localhost:3200/ready |
+| Tempo | nothing from Drishti yet; kept in the demo stack for later | http://localhost:3200/ready |
 | Grafana | nothing, it queries the other three | http://localhost:3000 (no login) |
 
 No extra OpenTelemetry Collector runs in Compose: the Drishti gateway is already one and sends OTLP straight to the backends.
@@ -477,7 +474,6 @@ podman compose -f demo/infrastructure/docker-compose.yaml ps     # all "running"
 # 2. Operator with the backends as install-time defaults (Option A)
 export DRISHTI_METRICS_ENDPOINT=http://prometheus:9090/api/v1/otlp
 export DRISHTI_LOGS_ENDPOINT=http://loki:3100/otlp
-export DRISHTI_TRACES_ENDPOINT=http://tempo:4318
 make install run
 ```
 
@@ -511,7 +507,7 @@ Stop the stack with `podman compose -f demo/infrastructure/docker-compose.yaml d
 
 Give an SRE one object per cluster that turns on standard logs and metrics collection, with good defaults and no knowledge of backend URLs or OTel internals. Keep platform differences (GKE, EKS, OpenShift) inside the operator.
 
-**Non-goals for v1alpha1:** dashboards and alerts, application monitoring (instrumenting apps, OTel SDKs, receiving app metrics, logs or traces), tracing collection from nodes, multi-tenancy inside one cluster.
+**Non-goals for v1alpha1:** dashboards and alerts, application monitoring (instrumenting apps, OTel SDKs, receiving app metrics or logs), multi-tenancy inside one cluster.
 
 ### 6.2 Architecture
 
@@ -544,7 +540,6 @@ flowchart LR
   end
   GW -- OTLP/HTTP metrics --> PROM[(Prometheus)]
   GW -- OTLP/HTTP logs + events --> LOKI[(Loki)]
-  GW -- OTLP/HTTP traces --> TEMPO[(Tempo)]
 ```
 
 **How it works, in short**
@@ -553,9 +548,9 @@ flowchart LR
 >
 > - **Agents** **poll** their node's kubelet every 30s for CPU, memory, disk and network (and tail logs if enabled), then send it to the gateway.
 > - The **cluster collector** uses **list + watch** on the API server to keep a live copy of cluster **objects**. It turns that copy into **state metrics** every 30s, and turns **events** into logs as they arrive, then sends them to the gateway.
-> - The **gateways** receive everything, add the cluster labels and send it to Prometheus, Loki and Tempo. They hold no cluster state, so there can be as many as the load needs.
+> - The **gateways** receive everything, add the cluster labels and send it to Prometheus and Loki. They hold no cluster state, so there can be as many as the load needs.
 >
-> In every collector, data goes through **processors** (`memory_limiter` → labels → `batch`, which waits up to 5s or 8192 items), then gets **exported**: agents and the cluster collector to the gateways, and the gateways to Prometheus, Loki and Tempo.
+> In every collector, data goes through **processors** (`memory_limiter` → labels → `batch`, which waits up to 5s or 8192 items), then gets **exported**: agents and the cluster collector to the gateways, and the gateways to Prometheus and Loki.
 
 ```
 kubelet ────poll 30s─────► agents (1 per node) ─────────┐
@@ -565,7 +560,7 @@ API server ──list+watch──► cluster collector (1) ───────
                events → logs at once)          gateway (N replicas)
                                                         │ memory_limiter → add cluster labels → batch
                                                         ▼
-                                              Prometheus / Loki / Tempo
+                                              Prometheus / Loki
 ```
 
 ### 6.3 The three collectors
@@ -838,7 +833,6 @@ Step by step for `kubectl apply -f yaml/cluster.yml`:
 | `spec.collectionInterval` | duration | no | `30s` | kubelet_stats + k8s_cluster interval |
 | `spec.gateway.replicas` | int (1–20) | no | `2` | Number of gateway pods sharing the export load |
 | `spec.destination.metrics` | URL `^https?://` | no | install default | OTLP/HTTP base URL |
-| `spec.destination.traces` | URL | no | install default | |
 | `spec.destination.logs` | URL | no | install default | |
 | `spec.collectorResources.perNode.{cpu,memory}` | quantity | no | per platform | Agent requests = limits |
 | `spec.collectorResources.central.{cpu,memory}` | quantity | no | `250m`, `512Mi` | Each gateway replica, requests = limits |

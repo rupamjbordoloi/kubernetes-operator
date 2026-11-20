@@ -82,8 +82,6 @@ spec:
           value: ""
         - name: DRISHTI_LOGS_ENDPOINT
           value: ""
-        - name: DRISHTI_TRACES_ENDPOINT
-          value: ""
         ports:
         - containerPort: 8081
           name: health

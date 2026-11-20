@@ -118,11 +118,6 @@ type DestinationSpec struct {
 	// +kubebuilder:validation:Pattern=`^https?://`
 	Metrics string `json:"metrics,omitempty"`
 
-	// traces OTLP/HTTP endpoint, e.g. http://tempo.observability.svc:4318
-	// +optional
-	// +kubebuilder:validation:Pattern=`^https?://`
-	Traces string `json:"traces,omitempty"`
-
 	// logs OTLP/HTTP endpoint, e.g. http://loki.observability.svc:3100/otlp
 	// +optional
 	// +kubebuilder:validation:Pattern=`^https?://`

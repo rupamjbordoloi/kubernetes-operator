@@ -248,8 +248,9 @@ func renderClusterCollectorConfig(cm *monitoringv1alpha1.ClusterMonitoring, gate
 }
 
 // renderGatewayConfig builds the gateway config. It is the only component
-// that talks to the backends: it receives OTLP from the agents, the cluster
-// collector and apps, stamps the cluster / environment labels, and exports.
+// that talks to the backends: it receives OTLP metrics and logs from the
+// agents and the cluster collector, stamps the cluster / environment labels,
+// and exports.
 // It holds no cluster state, so any number of replicas can run it.
 func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment string,
 	dest monitoringv1alpha1.DestinationSpec) (string, error) {
@@ -294,14 +295,14 @@ func renderGatewayConfig(cm *monitoringv1alpha1.ClusterMonitoring, environment s
 		return name
 	}
 
-	common := []string{memoryLimiter, clusterLabels, batchProcessor}
 	otlpIn := []string{otlpReceiver}
 	pipelines := m{
 		"metrics": pipeline(otlpIn,
 			[]string{memoryLimiter, clusterLabels, "transform/labels", batchProcessor},
 			[]string{exporterFor("metrics", dest.Metrics)}),
-		"logs":   pipeline(otlpIn, common, []string{exporterFor("logs", dest.Logs)}),
-		"traces": pipeline(otlpIn, common, []string{exporterFor("traces", dest.Traces)}),
+		"logs": pipeline(otlpIn,
+			[]string{memoryLimiter, clusterLabels, batchProcessor},
+			[]string{exporterFor("logs", dest.Logs)}),
 	}
 
 	cfg["receivers"] = receivers

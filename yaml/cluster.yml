@@ -54,7 +54,6 @@ spec:
   # The values below match the local stack in demo/infrastructure.
   # destination:
   #   metrics: http://prometheus:9090/api/v1/otlp
-  #   traces:  http://tempo:4318
   #   logs:    http://loki:3100/otlp
 
   # OPTIONAL. Number of gateway pods. Default: 2.

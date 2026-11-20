@@ -70,10 +70,11 @@ var _ = Describe("Collector config rendering", func() {
 			monitoringv1alpha1.DestinationSpec{Logs: "http://loki:3100/otlp"})
 		Expect(err).NotTo(HaveOccurred())
 		p := pipelinesOf(cfg)
-		for _, name := range []string{"metrics", "logs", "traces"} {
+		// Only metrics and logs: Drishti collects no traces.
+		Expect(p).To(HaveLen(2))
+		for _, name := range []string{"metrics", "logs"} {
 			Expect(p[name]).To(HaveKeyWithValue("receivers", ConsistOf(otlpReceiver)))
 		}
-		Expect(p).NotTo(HaveKey("logs/events"))
 		Expect(cfg).NotTo(ContainSubstring(k8sClusterReceiver))
 		Expect(cfg).NotTo(ContainSubstring(k8sObjectsReceiver))
 		Expect(cfg).To(ContainSubstring("otlp_http/logs"))
