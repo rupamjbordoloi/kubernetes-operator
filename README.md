@@ -12,6 +12,7 @@
 6. [Design document](#6-design-document)
 7. [How it works: reconcile loop](#7-how-it-works-reconcile-loop)
 8. [API reference](#8-api-reference)
+   - [Example `cluster.yaml`](#81-example-clusteryaml)
 9. [Troubleshooting](#9-troubleshooting)
 10. [Project layout](#10-project-layout)
 
@@ -40,7 +41,7 @@ Drishti then creates:
 | `<name>-gateway` | Deployment (`spec.gateway.replicas`, default 2) + Service + headless Service | Receives data from the agents and the cluster collector, and is the only component that talks to the backends |
 | `<name>-collector` | ServiceAccount + ClusterRole + ClusterRoleBinding | Read-only API access for the agent and the cluster collector |
 
-The full annotated example is [yaml/cluster.yml](yaml/cluster.yml).
+To write one for your own cluster, see [8.1 Example `cluster.yaml`](#81-example-clusteryaml). The local quick start uses [demo/cluster.yml](demo/cluster.yml).
 
 ---
 
@@ -57,7 +58,7 @@ Go to the root of the project, then:
 export KIND_EXPERIMENTAL_PROVIDER=podman
 
 # 1. Local cluster: 1 control plane + 2 workers. This also creates the "kind" network.
-kind create cluster --name drishti --config yaml/kind-config.yaml
+kind create cluster --name drishti --config demo/kind/kind-config.yaml
 
 # 2. Prometheus, Loki, Tempo and Grafana on the "kind" network (data is in memory only)
 podman compose -f demo/infrastructure/docker-compose.yaml up -d
@@ -75,7 +76,7 @@ Go to the root of the project, then:
 
 ```bash
 # 5. Ask for monitoring of this cluster
-kubectl apply -f yaml/cluster.yml
+kubectl apply -f demo/cluster.yml
 
 # 6. Wait until READY is True (about a minute: images are pulled first)
 kubectl get cmon -w
@@ -98,7 +99,7 @@ Open **Grafana at http://localhost:3000** (no login) → **Explore**:
 **Clean up**
 
 ```bash
-kubectl delete -f yaml/cluster.yml                              # removes every collector
+kubectl delete -f demo/cluster.yml                              # removes every collector
 podman compose -f demo/infrastructure/docker-compose.yaml down  # stops the backends, data is discarded
 kind delete cluster --name drishti
 ```
@@ -143,10 +144,10 @@ cat "$(ls /etc/ssl/cert.pem /etc/ssl/certs/ca-certificates.crt 2>/dev/null | hea
 podman machine ssh "sudo tee /etc/pki/ca-trust/source/anchors/zscaler.crt > /dev/null && sudo update-ca-trust" < ~/zscaler.crt
 ```
 
-**4. Create `yaml/kind-config-zscaler.yml`.** Same cluster as `yaml/kind-config.yaml`, plus the bundle mounted into every node as its trusted CA list:
+**4. Create `demo/kind/kind-config-zscaler.yml`.** Same cluster as `demo/kind/kind-config.yaml`, plus the bundle mounted into every node as its trusted CA list:
 
 ```bash
-cat > yaml/kind-config-zscaler.yml <<EOF
+cat > demo/kind/kind-config-zscaler.yml <<EOF
 # Generated from the README (Quick start behind Zscaler). Not committed:
 # it contains your home directory path.
 kind: Cluster
@@ -167,7 +168,7 @@ EOF
 Run it exactly like this rather than copying the YAML into a file by hand. kind doesn't expand variables, so the file must contain your real home path, and the shell writes it in place of `$HOME` here. Check it: the `hostPath` must start with your home directory, not `$HOME`:
 
 ```bash
-grep hostPath yaml/kind-config-zscaler.yml
+grep hostPath demo/kind/kind-config-zscaler.yml
 ```
 
 The file is listed in `.gitignore`, so it is never pushed.
@@ -176,7 +177,7 @@ The file is listed in `.gitignore`, so it is never pushed.
 
 ```bash
 export KIND_EXPERIMENTAL_PROVIDER=podman
-kind create cluster --name drishti --config yaml/kind-config-zscaler.yml
+kind create cluster --name drishti --config demo/kind/kind-config-zscaler.yml
 ```
 
 Image pulls now work on every node, with no further steps. Check one:
@@ -269,7 +270,7 @@ kubebuilder create api \
   --namespaced=false --resource --controller
 ```
 
-That produces `apiVersion: monitoring.drishti.io/v1alpha1, kind: ClusterMonitoring`, which matches [yaml/cluster.yml](yaml/cluster.yml).
+That produces `apiVersion: monitoring.drishti.io/v1alpha1, kind: ClusterMonitoring`, which matches the example in [8.1](#81-example-clusteryaml).
 
 The hand-written code is:
 
@@ -311,11 +312,11 @@ What the tests cover:
 
 ### 4.1 Create the cluster
 
-Behind Zscaler, use `yaml/kind-config-zscaler.yml` instead (see [Quick start behind Zscaler](#quick-start-behind-zscaler)).
+Behind Zscaler, use `demo/kind/kind-config-zscaler.yml` instead (see [Quick start behind Zscaler](#quick-start-behind-zscaler)).
 
 ```bash
 export KIND_EXPERIMENTAL_PROVIDER=podman
-kind create cluster --name drishti --config yaml/kind-config.yaml
+kind create cluster --name drishti --config demo/kind/kind-config.yaml
 kubectl get nodes          # 1 control-plane + 2 workers
 ```
 
@@ -345,7 +346,7 @@ kubectl -n drishti-system logs deploy/drishti-controller-manager -f
 ### 4.4 Apply the ClusterMonitoring
 
 ```bash
-kubectl apply -f yaml/cluster.yml
+kubectl apply -f demo/cluster.yml
 # or, with logs enabled:
 # kubectl apply -f config/samples/monitoring_v1alpha1_clustermonitoring.yaml
 ```
@@ -403,7 +404,7 @@ kubectl patch cmon hlr-gke-prod --type merge -p '{"spec":{"clusterName":"other"}
 ### 4.7 Clean up
 
 ```bash
-kubectl delete -f yaml/cluster.yml     # garbage-collects every child (owner references)
+kubectl delete -f demo/cluster.yml     # garbage-collects every child (owner references)
 make undeploy                          # if you used Option B
 make uninstall                         # removes the CRD
 kind delete cluster --name drishti
@@ -806,7 +807,7 @@ sequenceDiagram
 
 Every object is written with `controllerutil.CreateOrUpdate` and a controller owner reference, so the loop is **idempotent**: running it 1 or 100 times gives the same result. Manual edits or deletes of children are reverted on the next event.
 
-Step by step for `kubectl apply -f yaml/cluster.yml`:
+Step by step for `kubectl apply -f demo/cluster.yml`:
 
 1. The API server fills defaults (`logs: false`, `collectionInterval: 30s`, and so on), checks `platform ∈ {gke,eks,ocp}`, and stores the object.
 2. The controller receives the event and checks it is the only (oldest) ClusterMonitoring.
@@ -842,6 +843,56 @@ Step by step for `kubectl apply -f yaml/cluster.yml`:
 | `status.conditions[type=Ready]` | Condition | | | See [6.8](#68-status) |
 
 Full schema: [config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml](config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml), or run `kubectl explain clustermonitoring.spec --recursive`.
+
+### 8.1 Example `cluster.yaml`
+
+To monitor a real cluster, create a `cluster.yaml` like this one. Keep it with the rest of that cluster's configuration (for example in your deployment or GitOps repository), not in this repository. Only `platform` and `clusterName` are required; every other field shows its default and can be left out.
+
+```yaml
+apiVersion: monitoring.drishti.io/v1alpha1
+kind: ClusterMonitoring
+metadata:
+  name: platform               # object name; prefixes everything Drishti creates
+spec:
+  platform: gke                # REQUIRED: gke | eks | ocp
+  clusterName: hlr-gke-prod    # REQUIRED: label on all data, unique across your clusters, immutable
+  environment: prod            # default: the operator's install-time environment
+
+  collect:
+    nodes: true                # node CPU, memory, disk, network
+    pods: true                 # pod and container usage, plus cluster state metrics
+    events: true               # Kubernetes events, sent as logs
+    logs: false                # container logs from every node (opt-in: high volume)
+
+  collectionInterval: 30s      # how often metrics are read
+
+  gateway:
+    replicas: 2                # gateway pods sharing the export load
+
+  # Only needed when this cluster must send somewhere other than the
+  # install-time defaults:
+  # destination:
+  #   metrics: http://prometheus.monitoring.svc:9090/api/v1/otlp
+  #   logs:    http://loki.monitoring.svc:3100/otlp
+
+  # Only needed when collectors are throttled or run out of memory:
+  # collectorResources:
+  #   perNode:          { cpu: 200m, memory: 256Mi }   # each agent
+  #   central:          { cpu: 250m, memory: 512Mi }   # each gateway replica
+  #   clusterCollector: { cpu: 250m, memory: 512Mi }   # raise memory on large clusters
+```
+
+Apply it, then wait for `READY` to become `True`:
+
+```bash
+kubectl apply -f cluster.yaml
+```
+
+```bash
+kubectl get cmon -w
+```
+
+[demo/cluster.yml](demo/cluster.yml) is the same object with every field explained, set up for the local kind cluster.
 
 ---
 
@@ -886,10 +937,11 @@ Full schema: [config/crd/bases/monitoring.drishti.io_clustermonitorings.yaml](co
 │   ├── manager/manager.yaml            # operator Deployment + env defaults
 │   ├── default/                        # kustomize entry for make deploy (ns drishti-system)
 │   └── samples/                        # example CR (logs on)
-├── demo/infrastructure/                # compose file: Prometheus, Loki, Tempo, Grafana (5.1)
-├── yaml/
-│   ├── cluster.yml                     # the annotated ClusterMonitoring this operator implements
-│   └── kind-config.yaml                # 1 control-plane + 2 workers
+├── demo/                               # local quick start only, not part of the operator
+│   ├── cluster.yml                     # annotated ClusterMonitoring for the local cluster
+│   ├── kind/kind-config.yaml           # 1 control-plane + 2 workers
+│   ├── kind/kind-config-zscaler.yml    # generated from the README, gitignored
+│   └── infrastructure/                 # compose file: Prometheus, Loki, Tempo, Grafana (5.1)
 ├── test/e2e/                           # scaffolded kind-based e2e (make test-e2e)
 ├── Dockerfile
 └── Makefile

@@ -2,6 +2,9 @@
 # ClusterMonitoring — "monitor this whole Kubernetes cluster"
 # One per cluster. It is cluster-scoped, so there is no namespace.
 #
+# Used by the local quick start (kind + demo/infrastructure). For a real
+# cluster, write your own from the example in the README (8.1).
+#
 # What Drishti creates from this:
 #   - agent:             DaemonSet, one per node (node + pod metrics, logs)
 #   - cluster collector: Deployment, always 1 (cluster state metrics, events)
@@ -78,7 +81,7 @@ spec:
 
 # ---------------------------------------------------------------------
 # status: is written BY DRISHTI, never by the SRE. Example of what
-# `kubectl get clustermonitoring hlr-gke-prod -o yaml` would show:
+# `kubectl get clustermonitoring platform -o yaml` would show:
 #
 # status:
 #   conditions:

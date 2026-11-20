@@ -31,4 +31,4 @@ go.work
 
 # Local kind config for Zscaler, generated from the README: it contains the
 # user's home directory path, so it must not be committed
-yaml/kind-config-zscaler.yml
+demo/kind/kind-config-zscaler.yml
