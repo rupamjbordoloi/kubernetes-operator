@@ -70,7 +70,7 @@ var _ = Describe("Collector config rendering", func() {
 			monitoringv1alpha1.DestinationSpec{Logs: "http://loki:3100/otlp"})
 		Expect(err).NotTo(HaveOccurred())
 		p := pipelinesOf(cfg)
-		// Only metrics and logs: Drishti collects no traces.
+		// Exactly two pipelines: metrics and logs.
 		Expect(p).To(HaveLen(2))
 		for _, name := range []string{"metrics", "logs"} {
 			Expect(p[name]).To(HaveKeyWithValue("receivers", ConsistOf(otlpReceiver)))
